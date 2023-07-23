@@ -17,5 +17,3 @@ serde_json = "1.0.100"
 object_store = { version = "0.6.1", features = ["aws", "http"] }
 url = "2.4.0"
 tracing-subscriber = "0.3.17"
-shuttle-runtime = "0.21.0"
-shuttle-actix-web = "0.21.0"

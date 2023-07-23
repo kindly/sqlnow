@@ -1,4 +1,5 @@
 use eyre::Result;
+use std::env;
 use clap::Parser;
 use libquerier::Config;
 use libquerier::{main_web, get_app_data};
@@ -44,12 +45,27 @@ async fn main() -> Result<()> {
 
     let app_data = get_app_data(config).await?;
 
+    let host = match env::var("HOST") {
+        Ok(val) => val,
+        Err(_) => "127.0.0.1".into(),
+    };
+
+    let port: u16 = match env::var("PORT") {
+        Ok(val) => {
+            match val.parse::<u16>() {
+                Ok(val) => val,
+                Err(_) => 8080
+            }
+        }
+        Err(_) => 8080
+    };
+
     HttpServer::new(move || {
       App::new()
           .configure(main_web)
           .app_data(Data::new(app_data.clone()))
       })
-      .bind(("127.0.0.1", 8080))?
+      .bind((host, port))?
       .run()
       .await?;
     //

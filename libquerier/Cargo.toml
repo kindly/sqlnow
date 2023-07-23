@@ -23,8 +23,6 @@ serde_json = {"workspace" = true}
 object_store = {"workspace" = true}
 url = {"workspace" = true}
 tracing-subscriber = {"workspace" = true}
-shuttle-runtime = {"workspace" = true}
-shuttle-actix-web = {"workspace" = true}
 include_dir = { version = "0.7.3", features = ["glob"] }
 
 [profile.release]
