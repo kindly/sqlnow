@@ -73,11 +73,11 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
 
     match var("MAX_MEMORY") {
         Ok(v) => {
-            let max_memory = v.parse::<usize>()?;
-            runtime_cfg = runtime_cfg.with_memory_limit(1024 * 1024 * 1024 * max_memory, memory_fraction);
+            let max_memory = v.parse::<f64>()?;
+            runtime_cfg = runtime_cfg.with_memory_limit((1024.0 * 1024.0 * 1024.0 * max_memory) as usize, memory_fraction);
         },
         Err(_) => {
-            runtime_cfg = runtime_cfg.with_memory_limit(1024 * 1024 * 1024 * 4, memory_fraction);
+            runtime_cfg = runtime_cfg.with_memory_limit((1024.0 * 1024.0 * 1024.0 * 4.0) as usize, memory_fraction);
         }
     }
 
