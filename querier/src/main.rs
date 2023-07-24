@@ -60,16 +60,25 @@ async fn main() -> Result<()> {
         Err(_) => 8080
     };
 
+    let workers: usize = match env::var("WORKERS") {
+        Ok(val) => {
+            match val.parse::<usize>() {
+                Ok(val) => val,
+                Err(_) => 1
+            }
+        }
+        Err(_) => 1 
+    };
+
     HttpServer::new(move || {
       App::new()
           .configure(main_web)
           .app_data(Data::new(app_data.clone()))
       })
       .bind((host, port))?
+      .workers(workers)
       .run()
       .await?;
-    //
-    // Ok(())
 
     Ok(())
 }

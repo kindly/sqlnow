@@ -7,6 +7,7 @@ use minijinja::{Environment, context};
 use csv::ReaderBuilder;
 use serde::{Deserialize, Serialize};
 use url;
+use std::env::var;
 use include_dir::{include_dir, Dir, DirEntry};
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
@@ -58,9 +59,27 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
     let mut runtime_cfg = datafusion::execution::runtime_env::RuntimeConfig::new();
     // let memory_pool = datafusion::execution::memory_pool::FairSpillPool::new(1024 * 1024 * 1024 * 4);
     // runtime_cfg = runtime_cfg.with_memory_pool(Arc::new(memory_pool));
+    //
+    let workers = match var("WORKERS") {
+        Ok(v) => {
+            v.parse::<usize>()?
+        },
+        Err(_) => {
+            1
+        }
+    };
 
-    runtime_cfg = runtime_cfg.with_memory_limit(1024 * 1024 * 1024 * 4, 0.25);
+    let memory_fraction = workers as f64 / 100.0;
 
+    match var("MAX_MEMORY") {
+        Ok(v) => {
+            let max_memory = v.parse::<usize>()?;
+            runtime_cfg = runtime_cfg.with_memory_limit(1024 * 1024 * 1024 * max_memory, memory_fraction);
+        },
+        Err(_) => {
+            runtime_cfg = runtime_cfg.with_memory_limit(1024 * 1024 * 1024 * 4, memory_fraction);
+        }
+    }
 
     let runtime = datafusion::execution::runtime_env::RuntimeEnv::new(runtime_cfg)?;
 
