@@ -4,12 +4,12 @@ members = ["libquerier", "querier"]
 [workspace.dependencies]
 actix-web = "4.3.1"
 datafusion = { version = "27.0.0", no-default-features = true }
-minijinja = { version = "1.0.3", features = ["loader"] }
+minijinja = { version = "1.0.3", features = ["loader", "builtins", "urlencode"] }
 tokio = { version = "1.28.2", features = ["time"] }
-jemallocator = "0.3.2"
 clap = { version = "4.3.8", features = ["derive"] }
 eyre = "0.6.8"
 arrow-csv = "42.0.0"
+arrow-json = "42.0.0"
 arrow = "42.0.0"
 csv = "1.2.2"
 serde = { version = "1.0.169", features = ["derive"] }

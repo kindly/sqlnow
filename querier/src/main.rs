@@ -19,8 +19,8 @@ async fn main() -> Result<()> {
     let mut files = vec![];
 
     for file in cli.files.iter() {
-        if !file.ends_with(".parquet") {
-            return Err(eyre::eyre!("File {} is not a parquet file", file))
+        if !file.ends_with(".parquet") && !file.ends_with(".csv") {
+            return Err(eyre::eyre!("File {} is not a parquet or csv file", file))
         }
         if file.starts_with("s3://") {
             let fake_file = file.get(5..).unwrap();

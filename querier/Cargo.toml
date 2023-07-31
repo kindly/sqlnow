@@ -10,7 +10,6 @@ actix-web = {"workspace" = true}
 datafusion = {"workspace" = true}
 minijinja = {"workspace" = true}
 tokio = {"workspace" = true}
-jemallocator = {"workspace" = true}
 clap = {"workspace" = true}
 eyre = {"workspace" = true}
 arrow-csv = {"workspace" = true}

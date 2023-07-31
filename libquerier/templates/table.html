@@ -4,7 +4,7 @@
 
 <div>
     <div class="flex flex-row flex-wrap py-4">
-        <aside class="w-full sm:w-1/3 md:w-1/4 xl:w-1/6 px-2">
+        <aside class="w-full sm:w-1/2 md:w-1/3 xl:w-1/4 px-2">
           
           <h3 class="ml-4 mb-2"><strong>Tables</strong></h3>
           <hr>
@@ -22,18 +22,22 @@
           {% endfor %}
         </aside>
 
-        <main id="main" role="main" class="w-full sm:w-2/3 md:w-3/4 xl:w-5/6 pt-1 px-2">
+        <main id="main" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
           <div>
-            <form hx-target="#results" hx-params="sql" hx-get="/" hx-select="#results" hx-swap="outerHTML" hx-push-url="true">
+            <form hx-target="#results" hx-params="sql" hx-get="/" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results-spinner">
               <textarea class="w-full h-32 p-2 border border-slate-300 rounded-md" placeholder="Enter your sql" id="sql" name="sql">{{ sql }}</textarea>
               <button class="btn btn-primary btn-sm btn-active" type="submit">Run</button>
+              <span id="results-spinner" class="relative top-2 htmx-indicator loading loading-spinner loading-md"></span>
             </form>
           </div>
-          <div id="results">
+
+          <div id="results" class="mt-2">
           {% if error %}
             {{ error }}
           {% else %}
-            <table class="table table-xs table-pin-rows">
+            <a class="btn btn-sm" href="/results.csv?sql={{sql|urlencode}}">Download as CSV</a>
+            <a class="btn btn-sm" href="/results.json?sql={{sql|urlencode}}">JSONL Stream</a>
+            <table class="table table-xs table-pin-rows mt-2">
               <thead>
                 <tr>
                   {% for header in headers %}
