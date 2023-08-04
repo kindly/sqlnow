@@ -9,7 +9,7 @@ use url;
 use std::env::var;
 use tokio::time::timeout;
 use include_dir::{include_dir, Dir, DirEntry};
-use serde_json::json;
+use serde_json::{json, Value};
 use futures_util::StreamExt;
 use async_stream::stream;
 use csvs_convert::{Describer, DescriberOptions};
@@ -139,7 +139,7 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
     })
 }
 
-pub async fn get_stats(app_data: &AppData) {
+pub async fn get_stats(app_data: &AppData) -> Vec<Value> {
 
     let mut table_stats = vec![];
 
@@ -171,12 +171,15 @@ pub async fn get_stats(app_data: &AppData) {
         }
 
         let mut field_stats = vec![];
+        let mut field_types = vec![];
         for mut describer in describers {
             field_stats.push(describer.stats());
+            field_types.push(describer.guess_type());
         }
-        table_stats.push(json!({"name": table.name, "stats": field_stats, "fields": fields}));
-
+        table_stats.push(json!({"name": table.name, "stats": field_stats, "fields": fields, "types": field_types}));
     }
+
+    return table_stats
 }
 
 

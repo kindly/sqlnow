@@ -27,6 +27,7 @@ include_dir = { version = "0.7.3", features = ["glob"] }
 futures-util = "0.3.28"
 async-stream = "0.3.5"
 csvs_convert = { version = "0.8.7", default-features = false, features = ["converters"] }
+tokio-rayon = "2.1.0"
 
 [profile.release]
 debug = 1

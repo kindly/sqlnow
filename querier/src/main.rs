@@ -2,13 +2,16 @@ use eyre::Result;
 use std::env;
 use clap::Parser;
 use libquerier::Config;
-use libquerier::{main_web, get_app_data};
+use libquerier::{main_web, get_app_data, get_stats};
 use actix_web::{App, HttpServer, web::Data};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Name of the person to greet
+    #[arg(short, long)]
+    generate_stats: Option<String>,
+    #[arg(short, long)]
+    stats_file: Option<String>,
     files: Vec<String>,
 }
 
@@ -44,6 +47,17 @@ async fn main() -> Result<()> {
     };
 
     let app_data = get_app_data(config).await?;
+
+    if let Some(generate_stats) = cli.generate_stats {
+        let file = std::fs::File::create(generate_stats)?;
+        let stats = get_stats(&app_data).await;
+
+        serde_json::to_writer_pretty(file, &stats)?;
+        return Ok(())
+
+    }
+
+    
 
     let host = match env::var("HOST") {
         Ok(val) => val,
