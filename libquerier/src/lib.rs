@@ -1,24 +1,24 @@
-use datafusion::prelude::*;
-use actix_web::{get, web, HttpResponse, Responder, error::Error, web::ServiceConfig};
-use std::sync::Arc;
-use eyre::Result;
-use minijinja::{Environment, context};
-use csv::ReaderBuilder;
-use serde::{Deserialize, Serialize};
-use url;
-use std::env::var;
-use tokio::time::timeout;
-use include_dir::{include_dir, Dir, DirEntry};
-use serde_json::{json, Value};
-use futures_util::StreamExt;
+use actix_web::{error::Error, get, web, web::ServiceConfig, HttpResponse, Responder};
 use async_stream::stream;
+use csv::ReaderBuilder;
 use csvs_convert::{Describer, DescriberOptions};
+use datafusion::prelude::*;
+use eyre::Result;
+use futures_util::StreamExt;
+use include_dir::{include_dir, Dir, DirEntry};
+use minijinja::{context, Environment};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::env::var;
+use std::sync::Arc;
+use tokio::time::timeout;
+use url;
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone, Deserialize)]
 struct Params {
-    sql: Option<String>
+    sql: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct Config {
 pub struct TableMeta {
     name: String,
     fields: Vec<(String, String)>,
-} 
+}
 
 #[derive(Clone)]
 pub struct AppData {
@@ -40,20 +40,22 @@ pub struct AppData {
     pub env: Environment<'static>,
 }
 
-
-pub async fn get_app_data (config:Config) -> Result<AppData> {
+pub async fn get_app_data(config: Config) -> Result<AppData> {
     let mut env = Environment::new();
 
-    for entry in TEMPLATE_DIR.find("**/*.html").expect("template dir should exist"){
+    for entry in TEMPLATE_DIR
+        .find("**/*.html")
+        .expect("template dir should exist")
+    {
         match entry {
             DirEntry::File(file) => {
                 let content = file.contents_utf8().expect("utf8 file");
                 let path = file.path();
                 env.add_template_owned(path.to_string_lossy(), content)?;
-            },
+            }
             _ => {}
         }
-    };
+    }
 
     let mut cfg = datafusion::prelude::SessionConfig::new();
     cfg = cfg.set_bool("datafusion.optimizer.prefer_hash_join", false);
@@ -64,12 +66,8 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
     // runtime_cfg = runtime_cfg.with_memory_pool(Arc::new(memory_pool));
     //
     let workers = match var("WORKERS") {
-        Ok(v) => {
-            v.parse::<usize>()?
-        },
-        Err(_) => {
-            1
-        }
+        Ok(v) => v.parse::<usize>()?,
+        Err(_) => 1,
     };
 
     let memory_fraction = workers as f64 / 100.0;
@@ -77,10 +75,14 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
     match var("MAX_MEMORY") {
         Ok(v) => {
             let max_memory = v.parse::<f64>()?;
-            runtime_cfg = runtime_cfg.with_memory_limit((1024.0 * 1024.0 * 1024.0 * max_memory) as usize, memory_fraction);
-        },
+            runtime_cfg = runtime_cfg.with_memory_limit(
+                (1024.0 * 1024.0 * 1024.0 * max_memory) as usize,
+                memory_fraction,
+            );
+        }
         Err(_) => {
-            runtime_cfg = runtime_cfg.with_memory_limit((1024.0 * 1024.0 * 1024.0 * 4.0) as usize, memory_fraction);
+            runtime_cfg = runtime_cfg
+                .with_memory_limit((1024.0 * 1024.0 * 1024.0 * 4.0) as usize, memory_fraction);
         }
     }
 
@@ -100,7 +102,9 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
 
     for domain in domains.iter() {
         if domain.starts_with("s3") {
-            let obj_store = object_store::aws::AmazonS3Builder::from_env().with_url(domain).build()?;
+            let obj_store = object_store::aws::AmazonS3Builder::from_env()
+                .with_url(domain)
+                .build()?;
             runtime.register_object_store(&url::Url::parse(domain)?, Arc::new(obj_store));
         }
     }
@@ -112,24 +116,25 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
 
     for (name, file) in config.files.iter() {
         if file.ends_with(".csv") {
-            ctx.register_csv(&name, &file, CsvReadOptions::default()).await?;
+            ctx.register_csv(name, file, CsvReadOptions::default())
+                .await?;
         } else {
-            ctx.register_parquet(&name, &file, ParquetReadOptions::default()).await?;
+            ctx.register_parquet(name, file, ParquetReadOptions::default())
+                .await?;
         }
-        
 
         let table = ctx.table_provider(name).await.unwrap();
         let schema = table.schema();
         let table_meta = TableMeta {
             name: name.clone(),
-            fields: schema.fields().iter().map(|f| {
-                (f.data_type().to_string(),
-                f.name().clone())
-            }).collect(),
+            fields: schema
+                .fields()
+                .iter()
+                .map(|f| (f.data_type().to_string(), f.name().clone()))
+                .collect(),
         };
         schemas.push(table_meta);
     }
-
 
     Ok(AppData {
         config,
@@ -140,25 +145,59 @@ pub async fn get_app_data (config:Config) -> Result<AppData> {
 }
 
 pub async fn get_stats(app_data: &AppData) -> Vec<Value> {
-
     let mut table_stats = vec![];
 
     for table in app_data.schemas.iter() {
-        let dataframe = app_data.ctx.table(&table.name).await.expect("table should exist");
+        let dataframe = app_data
+            .ctx
+            .table(&table.name)
+            .await
+            .expect("table should exist");
+
+        // let mut field_threads = vec![];
+        // for field in dataframe.schema().fields() {
+        //     let dataframe_clone = dataframe.clone().select_columns(&[field.name()]).unwrap();
+        //
+        //     let field_thread = tokio_rayon::spawn(move || {
+        //
+        //         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        //
+        //         let foo = runtime.block_on(async move {
+        //             let mut describer = Describer::new_with_options(DescriberOptions::builder().stats(true).build());
+        //             let mut stream = dataframe_clone.execute_stream().await.expect("stream should exist");
+        //             while let Some(result) = stream.next().await {
+        //                 let foo = result.unwrap();
+        //                 let moo = foo.column(0);
+        //             }
+        //             json!({})
+        //         });
+        //         foo
+        //     });
+        //     field_threads.push(field_thread);
+        // }
+
         let mut fields = vec![];
-        let mut describers = vec![]; 
+        let mut describers = vec![];
+
         for field in dataframe.schema().fields() {
             fields.push(field.name().clone());
-            describers.push(Describer::new_with_options(DescriberOptions::builder().stats(true).build()));
+            describers.push(Describer::new_with_options(
+                DescriberOptions::builder().stats(true).build(),
+            ));
         }
 
-        let mut stream = dataframe.execute_stream().await.expect("stream should exist");
+        let mut stream = dataframe
+            .execute_stream()
+            .await
+            .expect("stream should exist");
         let mut csv_data = Vec::new();
 
         while let Some(result) = stream.next().await {
             let batch = result.unwrap();
 
-            let mut writer = arrow_csv::WriterBuilder::new().has_headers(false).build(csv_data);
+            let mut writer = arrow_csv::WriterBuilder::new()
+                .has_headers(false)
+                .build(csv_data);
             writer.write(&batch).unwrap();
             csv_data = writer.into_inner();
             let mut reader = ReaderBuilder::new().from_reader(csv_data.as_slice());
@@ -179,9 +218,8 @@ pub async fn get_stats(app_data: &AppData) -> Vec<Value> {
         table_stats.push(json!({"name": table.name, "stats": field_stats, "fields": fields, "types": field_types}));
     }
 
-    return table_stats
+    return table_stats;
 }
-
 
 pub fn main_web(service_config: &mut ServiceConfig) {
     service_config
@@ -190,52 +228,57 @@ pub fn main_web(service_config: &mut ServiceConfig) {
         .service(csv_results);
 }
 
-
 #[get("/")]
-async fn ui(app_data:  web::Data<AppData>, q: web::Query<Params>
-) -> Result<impl Responder, Error> {
-
+async fn ui(app_data: web::Data<AppData>, q: web::Query<Params>) -> Result<impl Responder, Error> {
     let mut headers = vec![];
     let mut rows = vec![];
 
-    let tmpl = app_data.env.get_template("table.html").expect("template exists");
+    let tmpl = app_data
+        .env
+        .get_template("table.html")
+        .expect("template exists");
 
     if q.sql.is_none() || q.sql.as_ref().unwrap().is_empty() {
-        let res = tmpl.render(&context! {
-            schemas => app_data.schemas,
-        }).map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-        
-        return Ok(HttpResponse::Ok().body(res))
+        let res = tmpl
+            .render(&context! {
+                schemas => app_data.schemas,
+            })
+            .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+
+        return Ok(HttpResponse::Ok().body(res));
     }
 
     if let Some(sql) = &q.sql {
-
         let df_result = app_data.ctx.sql(sql).await;
 
         if let Err(e) = df_result.as_ref() {
-            let res = tmpl.render(&context! {
-                schemas => app_data.schemas,
-                error => e.to_string(),
-                sql => q.sql.clone().unwrap_or("".to_string()),
-            }).map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-            return Ok(HttpResponse::Ok().body(res))
+            let res = tmpl
+                .render(&context! {
+                    schemas => app_data.schemas,
+                    error => e.to_string(),
+                    sql => q.sql.clone().unwrap_or("".to_string()),
+                })
+                .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+            return Ok(HttpResponse::Ok().body(res));
         }
 
-        let filtered = df_result.expect("just checked").limit(0, Some(1000)).unwrap();
+        let filtered = df_result
+            .expect("just checked")
+            .limit(0, Some(1000))
+            .unwrap();
 
         //let batches = filtered.collect().await.map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-        let batches = tokio::time::timeout(
-            std::time::Duration::from_secs(2000), 
-            filtered.collect()
-        ).await.map_err(
-                |e| actix_web::error::ErrorInternalServerError(e)
-            )?
-            .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-
+        let batches =
+            tokio::time::timeout(std::time::Duration::from_secs(2000), filtered.collect())
+                .await
+                .map_err(|e| actix_web::error::ErrorInternalServerError(e))?
+                .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
 
         let csv_data = vec![];
 
-        let mut csv_writer = arrow_csv::writer::WriterBuilder::new().has_headers(true).build(csv_data);
+        let mut csv_writer = arrow_csv::writer::WriterBuilder::new()
+            .has_headers(true)
+            .build(csv_data);
 
         for batch in batches {
             csv_writer.write(&batch).unwrap();
@@ -245,7 +288,7 @@ async fn ui(app_data:  web::Data<AppData>, q: web::Query<Params>
             //     }
             // }
             // batch.columns().iter().for_each(|col| {
-            //     
+            //
             // });
             //
             // let res = arrow_json::writer::record_batches_to_json_rows(&[&batch]).unwrap();
@@ -254,38 +297,41 @@ async fn ui(app_data:  web::Data<AppData>, q: web::Query<Params>
 
         let csv_data = csv_writer.into_inner();
 
-
         let mut reader = ReaderBuilder::new().from_reader(csv_data.as_slice());
 
         for row in reader.records() {
-            let data = row.unwrap().iter().map(|s| s.to_string()).collect::<Vec<String>>();
+            let data = row
+                .unwrap()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
             rows.push(data);
         }
 
         for header in reader.headers().unwrap() {
             headers.push(header.to_string());
-        };
+        }
     }
 
-    
-    let res = tmpl.render(&context! {
-        schemas => app_data.schemas,
-        headers => headers,
-        rows => rows,
-        sql => q.sql.clone().unwrap_or("".to_string()),
-    }).map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
-    
+    let res = tmpl
+        .render(&context! {
+            schemas => app_data.schemas,
+            headers => headers,
+            rows => rows,
+            sql => q.sql.clone().unwrap_or("".to_string()),
+        })
+        .map_err(|e| actix_web::error::ErrorInternalServerError(e))?;
+
     Ok(HttpResponse::Ok().body(res))
-    
 }
 
-
 #[get("/results.json")]
-async fn json_results(app_data:  web::Data<AppData>, q: web::Query<Params>
+async fn json_results(
+    app_data: web::Data<AppData>,
+    q: web::Query<Params>,
 ) -> Result<impl Responder, Error> {
-
     if q.sql.is_none() || q.sql.as_ref().unwrap().is_empty() {
-        return Ok(HttpResponse::Ok().json(json!({"error": "no sql"})))
+        return Ok(HttpResponse::Ok().json(json!({"error": "no sql"})));
     }
 
     let sql = q.sql.as_ref().expect("just checked");
@@ -293,16 +339,23 @@ async fn json_results(app_data:  web::Data<AppData>, q: web::Query<Params>
     let df_result = app_data.ctx.sql(&sql.clone()).await;
 
     if let Err(e) = df_result.as_ref() {
-        return Ok(HttpResponse::Ok().json(json!({"error": e.to_string()})))
+        return Ok(HttpResponse::Ok().json(json!({"error": e.to_string()})));
     }
-    let df_stream = df_result.expect("just checked").execute_stream().await.unwrap();
+    let df_stream = df_result
+        .expect("just checked")
+        .execute_stream()
+        .await
+        .unwrap();
 
-    let mut stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(df_stream.schema(), df_stream);
+    let mut stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+        df_stream.schema(),
+        df_stream,
+    );
 
     let output_stream = stream! {
         loop {
             let batch = timeout(
-                std::time::Duration::from_secs(20), 
+                std::time::Duration::from_secs(20),
                     stream.next()
                 ).await.map_err(
                     |e| actix_web::error::ErrorInternalServerError(e)
@@ -321,7 +374,7 @@ async fn json_results(app_data:  web::Data<AppData>, q: web::Query<Params>
             let buf = writer.into_inner();
             yield Ok::<actix_web::web::Bytes, Error>(actix_web::web::Bytes::from(buf));
         }
-        
+
         // for await batch in stream {
         //     let batch = batch.unwrap();
         //     let buf = Vec::new();
@@ -332,17 +385,17 @@ async fn json_results(app_data:  web::Data<AppData>, q: web::Query<Params>
         //     yield Ok::<actix_web::web::Bytes, Error>(actix_web::web::Bytes::from(buf));
         // }
     };
-    
+
     Ok(HttpResponse::Ok().streaming(Box::pin(output_stream)))
 }
 
-
 #[get("/results.csv")]
-async fn csv_results(app_data:  web::Data<AppData>, q: web::Query<Params>
+async fn csv_results(
+    app_data: web::Data<AppData>,
+    q: web::Query<Params>,
 ) -> Result<impl Responder, Error> {
-
     if q.sql.is_none() || q.sql.as_ref().unwrap().is_empty() {
-        return Ok(HttpResponse::Ok().json(json!({"error": "no sql"})))
+        return Ok(HttpResponse::Ok().json(json!({"error": "no sql"})));
     }
 
     let sql = q.sql.as_ref().expect("just checked");
@@ -350,20 +403,27 @@ async fn csv_results(app_data:  web::Data<AppData>, q: web::Query<Params>
     let df_result = app_data.ctx.sql(&sql.clone()).await;
 
     if let Err(e) = df_result.as_ref() {
-        return Ok(HttpResponse::Ok().json(json!({"error": e.to_string()})))
+        return Ok(HttpResponse::Ok().json(json!({"error": e.to_string()})));
     }
-    let df_stream = df_result.expect("just checked").execute_stream().await.unwrap();
+    let df_stream = df_result
+        .expect("just checked")
+        .execute_stream()
+        .await
+        .unwrap();
 
-    let mut stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(df_stream.schema(), df_stream);
+    let mut stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+        df_stream.schema(),
+        df_stream,
+    );
 
     let output_stream = stream! {
         let mut has_headers = true;
         loop {
             let batch = timeout(
-                std::time::Duration::from_secs(20), 
+                std::time::Duration::from_secs(20),
                     stream.next()
                 ).await.map_err(
-                    |e| actix_web::error::ErrorInternalServerError(e)
+                    actix_web::error::ErrorInternalServerError
                 )?;
 
             if batch.is_none() {
@@ -378,6 +438,6 @@ async fn csv_results(app_data:  web::Data<AppData>, q: web::Query<Params>
             yield Ok::<actix_web::web::Bytes, Error>(actix_web::web::Bytes::from(buf));
         }
     };
-    
+
     Ok(HttpResponse::Ok().streaming(Box::pin(output_stream)))
 }
