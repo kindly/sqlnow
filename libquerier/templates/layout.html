@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block main %}
+
+<div id="main">
+  <form autocomplete="off" method="post">
+  <div class="flex flex-row flex-wrap py-4">
+    <ul class="menu w-full w-56 rounded-box sm:w-1/2 md:w-1/3 xl:w-1/4 px-2">
+      <li class="menu-title">Tables</li>
+      {% for table in tables %}
+        <li>
+           <a hx-post="" hx-target="#main" hx-select="#main" hx-swap="outerHTML"  
+              hx-vals='{"current_table": {{ table|tojson }} }'
+              class="{% if table == current_schema.name %}active{% endif %}">{{ table }}</a>
+        </li>
+      {% endfor %}
+    </ul>
+
+    <main id="table" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
+      {% include "table.html" %}
+    </main>
+  </div>
+  </form>
+</div>
+
+{% endblock main %}
+

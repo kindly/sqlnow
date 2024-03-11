@@ -1,67 +1,57 @@
-{% extends "base.html" %}
-
-{% block main %}
 
 <div>
-    <div class="flex flex-row flex-wrap py-4">
-        <aside class="w-full sm:w-1/2 md:w-1/3 xl:w-1/4 px-2">
-          
-          <h3 class="ml-4 mb-2"><strong>Tables</strong></h3>
-          <hr>
-          {% for schema in schemas %}
-            <details class="collapse collapse-arrow">
-              <summary class="collapse-title pt-0 pb-1 min-h-0">{{ schema.name }}</summary>
-              <div class="collapse-content">
-                <ul>
-                  {% for type, field in schema.fields %}
-                    <li class="text-xs">{{ field }} <small>({{type}})</small></li>
-                  {% endfor %}
-                </ul>
-              </div>
-            </details>
-          {% endfor %}
-        </aside>
-
-        <main id="main" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
-          <div>
-            <form hx-target="#results" hx-params="sql" hx-get="/" hx-select="#results" hx-swap="outerHTML" hx-push-url="true" hx-indicator="#results-spinner">
-              <textarea class="w-full h-32 p-2 border border-slate-300 rounded-md" placeholder="Enter your sql" id="sql" name="sql">{{ sql }}</textarea>
-              <button class="btn btn-primary btn-sm btn-active" type="submit">Run</button>
-              <span id="results-spinner" class="relative top-2 htmx-indicator loading loading-spinner loading-md"></span>
-            </form>
-          </div>
-
-          <div id="results" class="mt-2">
-          {% if error %}
-            {{ error }}
-          {% else %}
-            <a class="btn btn-sm" href="/results.csv?sql={{sql|urlencode}}">Download as CSV</a>
-            <a class="btn btn-sm" href="/results.json?sql={{sql|urlencode}}">JSONL Stream</a>
-            <table class="table table-xs table-pin-rows mt-2">
-              <thead>
-                <tr>
-                  {% for header in headers %}
-                    <th>{{ header }}</th>
-                  {% endfor %}
-                </tr>
-              </thead>
-              <tbody>
-                {% for row in rows %}
-                <tr>
-                  {% for cell in row %}
-                  <td class="border border-slate-300 p-1">{{cell}}</td>
-                  {% endfor %}
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          {% endif %}
-          </div>
-        </main>
+  <div class="flex justify-between mb-4">
+    <div>
+      <input type="hidden" name="current_table" value="{{current_schema.name}}"></input>
+      <input class="hidden" type="submit"></input>
+      <button hx-trigger="click" class="btn btn-xs" hx-swap="outerHTML" hx-post="" hx-vals='{"new_sql": "select_star"}' hx-target="#table" hx-select="#table">SELECT *</button>
+      <button hx-trigger="click" class="btn btn-xs" hx-swap="outerHTML" hx-post="" hx-vals='{"new_sql": "select_fields"}' hx-target="#table" hx-select="#table" >SELECT fields</button>
     </div>
+    <div>
+      <span>Display Limit:</span>
+      <input class="input input-bordered input-xs w-20" name="display_limit" value="{{display_limit}}">
+    </div>
+  </div>
+
+
+  <textarea style="height: 500px" class="w-full p-2 border border-slate-300 rounded-md" placeholder="Enter your sql" id="sql" name="sql-{{current_schema.name}}">{{ sql }}</textarea>
+  {% for key, sql in other_sql %}
+    <input type="hidden" name="{{key}}" value="{{sql}}"></input>
+  {% endfor %}
+  <button 
+      hx-post=""
+      hx-target="#results"
+      hx-select="#results"
+      class="btn btn-primary btn-sm btn-active" 
+      hx-swap="outerHTML">Run</button>
+  <span id="results-spinner" class="relative top-2 htmx-indicator loading loading-spinner loading-md"></span>
 </div>
 
+<div id="results" class="mt-2">
+{% if sql_error %}
+  {{ sql_error }}
+{% else %}
+  <input class="btn btn-sm" type="submit" name="csv" value="CSV"/>
+  <input class="btn btn-sm" type="submit" name="tab" value="Tab delimited"/>
+  <input class="btn btn-sm" type="submit" name="jsonl" value="JSONL Stream"/>
 
-
-
-{% endblock main %}
+  <table class="table table-xs table-pin-rows mt-2">
+    <thead>
+      <tr>
+        {% for header in table_data.headers %}
+          <th>{{ header }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in table_data.rows %}
+      <tr>
+        {% for cell in row %}
+        <td class="border border-slate-300 p-1">{{cell}}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+</div>

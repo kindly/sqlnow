@@ -2,17 +2,18 @@ use eyre::Result;
 use std::env;
 use clap::Parser;
 use libquerier::Config;
-use libquerier::{main_web, get_app_data, get_stats};
+use libquerier::{main_web, get_app_data};
 use actix_web::{App, HttpServer, web::Data};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[arg(short, long)]
-    generate_stats: Option<String>,
+    db_file: Option<String>,
+
     #[arg(short, long)]
-    stats_file: Option<String>,
-    files: Vec<String>,
+    named_files: Option<Vec<String>>,
+    files: Option<Vec<String>>,
 }
 
 #[actix_web::main]
@@ -21,43 +22,42 @@ async fn main() -> Result<()> {
 
     let mut files = vec![];
 
-    for file in cli.files.iter() {
-        if !file.ends_with(".parquet") && !file.ends_with(".csv") {
-            return Err(eyre::eyre!("File {} is not a parquet or csv file", file))
-        }
-        if file.starts_with("s3://") {
-            let fake_file = file.get(5..).unwrap();
-            let path_buf = std::path::PathBuf::from(fake_file);
-            let table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
-            files.push((table_name, file.clone()));
-        } else {
-            let path_buf = std::path::PathBuf::from(file);
-            if !path_buf.exists() {
-                return Err(eyre::eyre!("File {} does not exist", file))
+    if let Some(cli_files) = cli.files {
+        for file in cli_files.iter() {
+            if !file.ends_with(".parquet") && !file.ends_with(".csv") {
+                return Err(eyre::eyre!("File {} is not a parquet or csv file", file))
             }
+            if file.starts_with("s3://") {
+                let fake_file = file.get(5..).unwrap();
+                let path_buf = std::path::PathBuf::from(fake_file);
+                let table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                files.push((table_name, file.clone()));
+            } else {
+                let path_buf = std::path::PathBuf::from(file);
+                if !path_buf.exists() {
+                    return Err(eyre::eyre!("File {} does not exist", file))
+                }
 
-            let table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                let table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
 
-            files.push((table_name, file.clone()));
+                files.push((table_name, file.clone()));
+            }
         }
     }
+
+    if let Some(named_files) = cli.named_files {
+        println!("named_files: {:?}", named_files);
+    }
+
+    // if let Some(db_file) = cli.db_file {
+    //     println!("db_file: {:?}", db_file);
+    // }
 
     let config = Config {
         files
     };
 
     let app_data = get_app_data(config).await?;
-
-    if let Some(generate_stats) = cli.generate_stats {
-        let file = std::fs::File::create(generate_stats)?;
-        let stats = get_stats(&app_data).await;
-
-        serde_json::to_writer_pretty(file, &stats)?;
-        return Ok(())
-
-    }
-
-    
 
     let host = match env::var("HOST") {
         Ok(val) => val,
@@ -84,12 +84,13 @@ async fn main() -> Result<()> {
         Err(_) => 1 
     };
 
+    //open::that(format!("http://{}:{}", host, port))?;
     HttpServer::new(move || {
       App::new()
           .configure(main_web)
           .app_data(Data::new(app_data.clone()))
       })
-      .bind((host, port))?
+      .bind((host.clone(), port.clone()))?
       .workers(workers)
       .run()
       .await?;
