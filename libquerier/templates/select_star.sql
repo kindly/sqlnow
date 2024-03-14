@@ -1,4 +1,5 @@
 SELECT
     *
 FROM
-    "{{schema.name}}"
+    {{schema.db_name}}
+LIMIT 10000

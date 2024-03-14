@@ -1,27 +1,60 @@
-use actix_web::{error::Error, get, post, web, web::ServiceConfig, HttpResponse, Responder, Either};
 use actix_web::error::{ErrorBadRequest, ErrorInternalServerError};
+use actix_web::{
+    error::Error, get, post, web, web::ServiceConfig, Either, HttpResponse, Responder,
+};
 use arrow::record_batch::RecordBatch;
 use async_stream::stream;
 use csv::ReaderBuilder;
 use duckdb::{params, Connection};
 use eyre::Result;
 use include_dir::{include_dir, Dir, DirEntry};
+use minijinja::filters::length;
 use minijinja::{context, Environment};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::{sync::Arc, vec};
 use tokio::sync::Mutex;
-use std::collections::HashMap;
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 
 #[derive(Debug, Clone)]
+pub enum DbType {
+    Postgres,
+    Sqlite,
+    Mysql,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalDatabase {
+    pub db_type: DbType,
+    pub name: String,
+    pub connection_string: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub files: Vec<(String, String)>,
+    pub database: Option<String>,
+    pub view_files: Vec<(String, String)>,
+    pub table_files: Vec<(String, String)>,
+    pub external_databases: Vec<ExternalDatabase>,
+    pub drop:bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DBTable {
+    catalog: String,
+    schema: String,
+    name: String,
+    //table_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TableMeta {
+    catalog: String,
+    schema: String,
     name: String,
+    db_name: String,
+    schema_display_name: String,
     fields: Vec<(String, String)>,
 }
 
@@ -40,16 +73,11 @@ pub struct AppData {
 }
 
 pub async fn get_app_data(config: Config) -> Result<AppData> {
+    
     let mut env = Environment::new();
 
-    for glob in vec![
-        "**/*.html",
-        "**/*.sql",
-    ] { 
-        for entry in TEMPLATE_DIR
-            .find(glob)
-            .expect("template dir should exist")
-        {
+    for glob in ["**/*.html", "**/*.sql"] {
+        for entry in TEMPLATE_DIR.find(glob).expect("template dir should exist") {
             if let DirEntry::File(file) = entry {
                 let content = file.contents_utf8().expect("utf8 file");
                 let path = file.path();
@@ -58,55 +86,166 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
         }
     }
 
-
     //let connection = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-    let connection = Connection::open_in_memory().unwrap();
+    let connection = match config.database.clone() {
+        Some(db) => {
+            Connection::open(db).unwrap()
+        }
+        None => {
+            Connection::open_in_memory().unwrap()
+        }
+    };
+
+    //Arc::new(Mutex::new(Connection::open(db).unwrap()))
 
     connection
-        .execute_batch("INSTALL parquet; LOAD parquet; INSTALL httpfs; LOAD https;")
-        .unwrap();
+        .execute_batch(
+            "INSTALL parquet; LOAD parquet; 
+                 INSTALL httpfs; LOAD https; 
+                 INSTALL aws; LOAD aws; 
+                 INSTALL postgres; LOAD postgres;
+                 INSTALL sqlite; LOAD sqlite;
+                 INSTALL mysql; LOAD mysql;
+                 ",
+        )?;
 
-    for (name, file) in config.files.iter() {
-        if file.ends_with(".csv") {
-            connection
-                .execute_batch(&format!(
-                    "CREATE VIEW \"{}\" AS SELECT * FROM read_csv('{}');",
-                    name, file
-                ))
-                .unwrap();
-        } else if file.ends_with(".parquet") {
-            connection
-                .execute_batch(&format!(
-                    "CREATE VIEW \"{}\" AS SELECT * FROM read_parquet('{}');",
-                    name, file
-                ))
-                .unwrap();
+    if config.drop {
+        for (name, _) in config.table_files.iter().chain(config.view_files.iter()) {
+            match connection.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\";", name)) {
+                Ok(_) => {}
+                Err(e) => {if !e.to_string().contains("Catalog Error") {
+                    return Err(e.into());
+                }}
+            }
+            match connection.execute_batch(&format!("DROP VIEW IF EXISTS \"{}\";", name)) {
+                Ok(_) => {}
+                Err(e) => {if !e.to_string().contains("Catalog Error") {
+                    return Err(e.into());
+                }}
+            }
         }
     }
 
+    for external_database in config.external_databases.iter() {
+        let db_type_string = match external_database.db_type {
+            DbType::Postgres => "POSTGRES",
+            DbType::Sqlite => "SQLITE",
+            DbType::Mysql => "MYSQL",
+        };
+        let sql = format!("ATTACH '{}' AS {} (TYPE {})", external_database.connection_string, external_database.name, db_type_string);
+        connection.execute_batch(&sql)?;
+    }
+
+    let external_database_names = config
+        .external_databases
+        .iter()
+        .map(|db| db.name.clone())
+        .collect::<Vec<String>>();
+
+    for (name, file) in config.view_files.iter() {
+        if file.ends_with(".csv") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
+                    name, file
+                ))?;
+        } else if file.ends_with(".parquet") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
+                    name, file
+                ))?;
+        }
+    }
+
+    for (name, file) in config.table_files.iter() {
+        if file.ends_with(".csv") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
+                    name, file
+                ))?
+        } else if file.ends_with(".parquet") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
+                    name, file
+                ))?
+        }
+    }
+
+
     let mut schemas = vec![];
 
-    for (name, _) in config.files.iter() {
+    let mut prepared = connection
+        .prepare("select table_catalog, table_schema, table_name from information_schema.tables 
+                       where table_schema not in ('information_schema', 'pg_catalog')")?;
+
+    let mapped_rows = prepared.query_map([], |row| {
+        Ok(DBTable {
+            schema: row.get(1)?,
+            name: row.get(2)?,
+            catalog: row.get(0)?,
+        })
+    })?;
+    
+    for row in mapped_rows {
+        let t = row.expect("should be able to get table");
         let mut fields = vec![];
 
         let mut prepared = connection
-            .prepare("select name, type from pragma_table_info(?)")
-            .unwrap();
+            .prepare("select column_name, data_type from information_schema.columns where table_catalog = ? and table_schema = ? and table_name = ?")?;
         let iter = prepared
-            .query_map(params![name], |row| {
-                Ok((row.get(0).unwrap(), row.get(1).unwrap()))
-            })
-            .unwrap();
+            .query_map(params![t.catalog, t.schema, t.name], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
 
         for value in iter {
-            let (field_name, type_): (String, String) = value.unwrap();
+            let (field_name, type_): (String, String) = value?;
             fields.push((field_name, type_));
         }
 
+        let external_database = external_database_names.contains(&t.catalog);
+
+        let schema = if t.schema == "main" && !external_database {
+            "".to_string()
+        } else {
+            t.schema
+        };
+
+        let schema_display_name = if external_database {
+            format!("{}.{}", t.catalog, schema)
+        } else {
+            schema.clone()
+        };
+
+        let mut db_name = String::new();
+        if external_database {
+            db_name.push_str(&format!("\"{}\".", t.catalog));
+        }
+        if external_database || !schema.is_empty() {
+            db_name.push_str(&format!("\"{}\".", schema));
+        }
+        db_name.push_str(&format!("\"{}\"", t.name));
+
+
+        if fields.is_empty() {
+            continue;
+        }
+
         schemas.push(TableMeta {
-            name: name.into(),
+            catalog: t.catalog,
+            schema,
+            name: t.name,
+            db_name,
+            schema_display_name,
             fields,
         });
+    };
+
+    println!("schemas: {:?}", schemas);
+    if schemas.len() == 0 {
+        return Err(eyre::eyre!("No tables found"));
     }
 
     Ok(AppData {
@@ -118,9 +257,7 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
 }
 
 pub fn main_web(service_config: &mut ServiceConfig) {
-    service_config
-        .service(ui)
-        .service(post_sql);
+    service_config.service(ui).service(post_sql);
 }
 
 fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<TableData> {
@@ -129,7 +266,7 @@ fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<Table
 
     let mut prepared = conn.prepare(sql)?;
 
-    let results = prepared.query_arrow(params![]).unwrap();
+    let results = prepared.query_arrow(params![])?;
 
     let csv_data = vec![];
 
@@ -177,42 +314,34 @@ async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
         .get_template("layout.html")
         .expect("template exists");
 
-    let tables = app_data
-        .schemas
-        .iter()
-        .map(|t| t.name.clone())
-        .collect::<Vec<String>>();
-
-    let current_schema = app_data.schemas.get(0).expect("at least onn table exists");
+    let current_schema = app_data.schemas.get(0).expect("at least one table should exists");
 
     let sql = generate_sql(&app_data, &current_schema, SqlType::SelectFields);
 
     let conn = app_data.connection.lock().await;
 
-    let table_data = run_query(&sql.as_str(), &conn, 1000).map_err(ErrorInternalServerError)?;
+    let table_data = run_query(&sql.as_str(), &conn, 500).map_err(ErrorInternalServerError)?;
 
     let res = tmpl
         .render(&context! {
             current_schema => current_schema,
-            tables => tables,
+            schemas => app_data.schemas.clone(),
             table_data => table_data,
             sql => sql,
-            display_limit => "1000",
+            display_limit => "500",
         })
         .map_err(|e| ErrorInternalServerError(e))?;
 
     Ok(HttpResponse::Ok().body(res))
-
 }
 
 #[derive(PartialEq, Copy, Clone)]
 enum SqlType {
     SelectStar,
-    SelectFields
+    SelectFields,
 }
 
 fn generate_sql(app_data: &AppData, schema: &TableMeta, sql_type: SqlType) -> String {
-
     let template = match sql_type {
         SqlType::SelectStar => "select_star.sql",
         SqlType::SelectFields => "table_schema.sql",
@@ -225,25 +354,33 @@ fn generate_sql(app_data: &AppData, schema: &TableMeta, sql_type: SqlType) -> St
 
     sql_tmpl
         .render(&context! {
-        schema  => schema,
-    }).expect("should render")
+            schema  => schema,
+        })
+        .expect("should render")
 }
 
 #[post("/")]
-async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, String>>) -> Result<Either<impl Responder, impl Responder>, Error> {
-
+async fn post_sql(
+    app_data: web::Data<AppData>,
+    q: web::Form<HashMap<String, String>>,
+) -> Result<Either<impl Responder, impl Responder>, Error> {
     let form = q.clone();
 
-    let tables = app_data
+    let current_table = form
+        .get("current_table")
+        .ok_or(ErrorBadRequest("current_table not found"))?;
+
+    let current_schema = app_data
         .schemas
         .iter()
-        .map(|t| t.name.clone())
-        .collect::<Vec<String>>();
+        .find(|t| t.db_name == *current_table)
+        .unwrap();
 
-    let current_table = form.get("current_table").ok_or(ErrorBadRequest("current_table not found"))?;
-    let current_schema = app_data.schemas.iter().find(|t| t.name == *current_table).unwrap();
-
-    let display_limit = form.get("display_limit").unwrap_or(&"1000".to_string()).parse::<usize>().unwrap_or(1000);
+    let display_limit = form
+        .get("display_limit")
+        .unwrap_or(&"1000".to_string())
+        .parse::<usize>()
+        .unwrap_or(1000);
 
     let mut other_sql = HashMap::new();
     for (key, value) in form.iter() {
@@ -254,16 +391,14 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
 
     let mut sql = match other_sql.remove(&format!("sql-{current_table}")) {
         Some(sql) => sql.to_owned(),
-        None => {
-            generate_sql(&app_data, &current_schema, SqlType::SelectFields)
-        }
+        None => generate_sql(&app_data, current_schema, SqlType::SelectFields),
     };
 
     if let Some(new_sql) = form.get("new_sql") {
         if new_sql == "select_star" {
-            sql = generate_sql(&app_data, &current_schema, SqlType::SelectStar);
+            sql = generate_sql(&app_data, current_schema, SqlType::SelectStar);
         } else if new_sql == "select_fields" {
-            sql = generate_sql(&app_data, &current_schema, SqlType::SelectFields);
+            sql = generate_sql(&app_data, current_schema, SqlType::SelectFields);
         }
     }
 
@@ -280,7 +415,7 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
     if output_format != OutputFormat::WEB {
         match outputs(app_data, sql, output_format).await {
             Ok(res) => return Ok(Either::Right(res)),
-            Err(e) => return Err(e)
+            Err(e) => return Err(e),
         }
     }
 
@@ -289,11 +424,12 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
         .get_template("layout.html")
         .expect("template exists");
 
-
     let conn = app_data.connection.lock().await;
 
-    let other_sql_list: Vec<(String, String)> = other_sql.iter().map(
-        |(k, v)| (k.to_owned(), v.to_owned())).collect();
+    let other_sql_list: Vec<(String, String)> = other_sql
+        .iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
 
     let table_data = run_query(&sql.as_str(), &conn, display_limit);
 
@@ -302,7 +438,7 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
             .render(&context! {
                 current_schema => current_schema,
                 other_sql => other_sql_list,
-                tables => tables,
+                schemas => app_data.schemas.clone(),
                 table_data => TableData { headers: vec![], rows: vec![] },
                 display_limit => display_limit.to_string(),
                 sql => sql,
@@ -317,7 +453,7 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
         .render(&context! {
             current_schema => current_schema,
             other_sql => other_sql_list,
-            tables => tables,
+            schemas => app_data.schemas.clone(),
             table_data => table_data.unwrap(),
             display_limit => display_limit.to_string(),
             sql => sql,
@@ -327,13 +463,12 @@ async fn post_sql(app_data: web::Data<AppData>, q: web::Form<HashMap<String, Str
     Ok(Either::Left(HttpResponse::Ok().body(res)))
 }
 
-
 #[derive(PartialEq, Copy, Clone)]
 enum OutputFormat {
     CSV,
     TSV,
     JSON,
-    WEB
+    WEB,
 }
 
 async fn outputs(
@@ -387,7 +522,7 @@ async fn outputs(
         OutputFormat::WEB => "",
     };
 
-    Ok(HttpResponse::Ok().insert_header(
-        ("Content-Disposition", content_disposition)
-    ).streaming(Box::pin(output_stream)))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Content-Disposition", content_disposition))
+        .streaming(Box::pin(output_stream)))
 }

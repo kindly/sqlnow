@@ -2,7 +2,7 @@
 <div>
   <div class="flex justify-between mb-4">
     <div>
-      <input type="hidden" name="current_table" value="{{current_schema.name}}"></input>
+      <input type="hidden" name="current_table" value="{{current_schema.db_name}}"></input>
       <input class="hidden" type="submit"></input>
       <button hx-trigger="click" class="btn btn-xs" hx-swap="outerHTML" hx-post="" hx-vals='{"new_sql": "select_star"}' hx-target="#table" hx-select="#table">SELECT *</button>
       <button hx-trigger="click" class="btn btn-xs" hx-swap="outerHTML" hx-post="" hx-vals='{"new_sql": "select_fields"}' hx-target="#table" hx-select="#table" >SELECT fields</button>
@@ -14,7 +14,7 @@
   </div>
 
 
-  <textarea style="height: 500px" class="w-full p-2 border border-slate-300 rounded-md" placeholder="Enter your sql" id="sql" name="sql-{{current_schema.name}}">{{ sql }}</textarea>
+  <textarea style="height: 500px" class="w-full p-2 border border-slate-300 rounded-md" placeholder="Enter your sql" id="sql" name="sql-{{current_schema.db_name}}">{{ sql }}</textarea>
   {% for key, sql in other_sql %}
     <input type="hidden" name="{{key}}" value="{{sql}}"></input>
   {% endfor %}
