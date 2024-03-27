@@ -1,8 +1,8 @@
 use eyre::Result;
 use std::env;
 use clap::Parser;
-use libquerier::{Config, ExternalDatabase, DbType};
-use libquerier::{main_web, get_app_data, };
+use libquerier::Config;
+use libquerier::{main_web, get_app_data, Input};
 use actix_web::{App, HttpServer, web::Data};
 
 #[derive(Parser, Debug, Clone)]
@@ -14,108 +14,158 @@ struct Cli {
     #[arg(short, long)]
     view: Option<Vec<String>>,
 
-    #[arg(short, long)]
-    postgres: Option<Vec<String>>,
-
-    #[arg(short, long)]
-    sqlite: Option<Vec<String>>,
-
     #[arg(long)]
     drop: bool,
 
     db: Option<String>,
 }
 
+// foo.xlsx
+// postgresql://user:password@localhost:5432/dbname
+// sqlite://path/to/db.sqlite
+// moo.parquet
+// *
+// moo.csv
+
+fn input_into_parts(input: &str) -> Input {
+    let mut name = "".to_owned();
+    let uri: String;
+    let mut hash = Vec::new();
+
+    let not_name: String;
+
+    match input.split_once('='){
+        Some((start, end)) => {
+            name = start.to_owned();
+            not_name = end.to_owned();
+        },
+        None => {
+            not_name = input.to_owned();
+        }
+    }
+
+    match not_name.rsplit_once('#') {
+        Some((start, end)) => {
+            uri = start.to_owned();
+
+            if !end.is_empty(){
+                let mut reader = csv::ReaderBuilder::new()
+                    .has_headers(false)
+                    .from_reader(end.as_bytes());
+
+                for record in reader.records() {
+                    let record = record.unwrap();
+                    for field in record.iter() {
+                        hash.push(field.to_owned());
+                    }
+                    break
+                }
+
+            }
+        },
+        None => {
+            uri = not_name.to_owned();
+        }
+    }
+
+    return Input {
+        name,
+        uri,
+        tables: hash
+    };
+
+}
+
 #[actix_web::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut view_files = vec![];
+    let mut views = vec![];
+    let mut tables = vec![];
 
-    if let Some(cli_files) = cli.view {
-        for file in cli_files.iter() {
-            if !file.ends_with(".parquet") && !file.ends_with(".csv") {
-                return Err(eyre::eyre!("File {} is not a parquet or csv file", file))
-            }
+    if let Some(cli_views) = cli.view {
+        for file in cli_views.iter() {
+            let mut input = input_into_parts(file);
 
-            let mut path= file.to_owned();
-            let mut table_name = "".to_owned();
-
-            if let Some(index)  = file.find("=") {
-                if file.len() > index+1 {
-                    table_name = file.get(0..index).expect("checked length").to_owned();
-                    path = file.get(index+1..).expect("checked length").to_owned();
-                }
-            }
-
-            if path.starts_with("s3://") {
-                let fake_file = file.get(5..).unwrap();
-                let path_buf = std::path::PathBuf::from(fake_file);
-                if table_name.is_empty() {
-                    table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
-                }
-                view_files.push((table_name, path));
-            } else {
-                let path_buf = std::path::PathBuf::from(&path);
+            if file.ends_with(".parquet") || file.ends_with(".csv") {
+                let path_buf = std::path::PathBuf::from(&input.uri);
                 if !path_buf.exists() {
-                    return Err(eyre::eyre!("File {} does not exist", path))
+                    return Err(eyre::eyre!("File {} does not exist", input.uri))
                 }
 
-                if table_name.is_empty() {
-                    table_name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                if input.name.is_empty() {
+                    input.name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                }
+            }
+
+            views.push(input);
+        }
+    }
+
+    if let Some(cli_tables) = cli.table {
+        for file in cli_tables.iter() {
+            let mut input = input_into_parts(file);
+
+            if file.ends_with(".parquet") || file.ends_with(".csv") {
+                let path_buf = std::path::PathBuf::from(&input.uri);
+                if !path_buf.exists() {
+                    return Err(eyre::eyre!("File {} does not exist", input.uri))
                 }
 
-                view_files.push((table_name, path));
+                if input.name.is_empty() {
+                    input.name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                }
             }
+            tables.push(input);
         }
     }
 
-    let mut external_databases = vec![];
 
-    if let Some(databases) = cli.postgres {
-        for database in databases.iter() {
-            if let Some(index)  = database.find("=") {
-                if database.len() > index+1 {
-                    let database_name = database.get(0..index).expect("checked length").to_owned();
-                    let connection_string = database.get(index+1..).expect("checked length").to_owned();
-                    external_databases.push(ExternalDatabase {
-                        name: database_name,
-                        connection_string,
-                        db_type: DbType::Postgres,
-                    });
-                } else {
-                    return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
-            } else {
-                return Err(eyre::eyre!("Database should be in the format name=connection_string"))
-            }
-        }
-    }
 
-    if let Some(databases) = cli.sqlite {
-        for database in databases.iter() {
-            if let Some(index)  = database.find("=") {
-                if database.len() > index+1 {
-                    let database_name = database.get(0..index).expect("checked length").to_owned();
-                    let connection_string = database.get(index+1..).expect("checked length").to_owned();
-                    external_databases.push(ExternalDatabase {
-                        name: database_name,
-                        connection_string,
-                        db_type: DbType::Sqlite,
-                    });
-                } else {
-                    return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
-            } else {
-                return Err(eyre::eyre!("Database should be in the format name=connection_string"))
-            }
-        }
-    }
+
+    // if let Some(databases) = cli.postgres {
+    //     for database in databases.iter() {
+    //         if let Some(index)  = database.find("=") {
+    //             if database.len() > index+1 {
+    //                 let database_name = database.get(0..index).expect("checked length").to_owned();
+    //                 let connection_string = database.get(index+1..).expect("checked length").to_owned();
+    //                 external_databases.push(ExternalDatabase {
+    //                     name: database_name,
+    //                     connection_string,
+    //                     db_type: DbType::Postgres,
+    //                 });
+    //             } else {
+    //                 return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
+    //         } else {
+    //             return Err(eyre::eyre!("Database should be in the format name=connection_string"))
+    //         }
+    //     }
+    // }
+
+    // if let Some(databases) = cli.sqlite {
+    //     for database in databases.iter() {
+    //         if let Some(index)  = database.find("=") {
+    //             if database.len() > index+1 {
+    //                 let database_name = database.get(0..index).expect("checked length").to_owned();
+    //                 let connection_string = database.get(index+1..).expect("checked length").to_owned();
+    //                 external_databases.push(ExternalDatabase {
+    //                     name: database_name,
+    //                     connection_string,
+    //                     db_type: DbType::Sqlite,
+    //                 });
+    //             } else {
+    //                 return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
+    //         } else {
+    //             return Err(eyre::eyre!("Database should be in the format name=connection_string"))
+    //         }
+    //     }
+    // }
 
     let config = Config {
         database: cli.db,
-        view_files,
+        views,
         drop: cli.drop,
-        table_files: vec![],
-        external_databases
+        tables,
     };
 
     let app_data = get_app_data(config).await?;
@@ -145,7 +195,8 @@ async fn main() -> Result<()> {
         Err(_) => 1 
     };
 
-    open::that(format!("http://{}:{}", host, port))?;
+    //open::that(format!("http://{}:{}", host, port))?;
+    println!("Server running on http://{}:{}", host, port);
 
     HttpServer::new(move || {
       App::new()

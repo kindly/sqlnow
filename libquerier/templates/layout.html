@@ -5,25 +5,72 @@
 <div id="main">
   <form autocomplete="off" method="post">
   <div class="flex flex-row flex-wrap py-4">
-    <ul class="menu w-full w-56 rounded-box sm:w-1/2 md:w-1/3 xl:w-1/4 px-2">
+    <ul class="menu menu-sm w-full w-56 rounded-box sm:w-1/2 md:w-1/3 xl:w-1/4 px-2">
+      <li>
+        <a hx-post="" hx-target="#tab_content" hx-select="#tab_content" hx-swap="outerHTML"  
+          hx-vals='{"current_tab": "query"}'
+          onclick="set_active(this)"
+          class='main_tab active'>query</a>
+        </a>
+      </li>
+      <li>
+        <a hx-post="" hx-target="#tab_content" hx-select="#tab_content" hx-swap="outerHTML"  
+          hx-vals='js:{"current_tab": "history", "history": localStorage.getItem("sql-history")}'
+          onclick="set_active(this)"
+          class='main_tab'>history</a>
+        </a>
+      </li>
       <li class="menu-title">Tables</li>
-      {% for schema in schemas %}
-        <li>
-           <a hx-post="" hx-target="#main" hx-select="#main" hx-swap="outerHTML"  
-              hx-vals='{"current_table": {{ schema.db_name|tojson }} }'
-              class="{% if schema.db_name == current_schema.db_name %}active{% endif %}">
-              {% if schema.schema_display_name != "" %}
-                {{schema.schema_display_name}}.{{schema.name}}
-              {% else %}
-                {{schema.name}}
-              {% endif %}
+      {% for tab in tabs %}
+        {% if tab.tab_type == "table" and not tab.section %}
+          <li>
+            <a hx-post="" hx-target="#tab_content" hx-select="#tab_content" hx-swap="outerHTML"  
+              hx-vals='{"current_tab": {{ tab.name|tojson }} }'
+              onclick="set_active(this)"
+              class="main_tab">
+              {{tab.schema.name}}
             </a>
+          </li>
+        {% endif %}
+      {% endfor %}
+      {% for section in sections %}
+        <li>
+          <details open>
+            <summary>{{section}}</summary>
+            <ul>
+            {% for tab in tabs %}
+              {% if tab.section == section %}
+                <li>
+                  <a hx-post="" hx-target="#tab_content" hx-select="#tab_content" hx-swap="outerHTML"  
+                    hx-vals='{"current_tab": {{ tab.name|tojson }} }'
+                    onclick="set_active(this)"
+                    class="main_tab">
+                    {{tab.schema.name}}
+                  </a>
+                </li>
+              {% endif %}
+            {% endfor %}
+            </ul>
+          </details>
         </li>
       {% endfor %}
     </ul>
 
-    <main id="table" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
-      {% include "table.html" %}
+    <main id="tab_content" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
+      {% for key, sql in other_sql %}
+        <input type="hidden" name="{{key}}" value="{{sql}}"></input>
+      {% endfor %}
+
+      {% if current_tab.tab_type == "table" or current_tab.tab_type == "query" %}
+        {% include "table.html" %}
+      {% endif %}
+
+      {% if current_tab.tab_type == "history" %}
+        <input type="hidden" name="display_limit" value="{{display_limit}}">
+        fsdfafdaf
+        {% include "history.html" %}
+      {% endif %}
+
     </main>
   </div>
   </form>
@@ -31,3 +78,65 @@
 
 {% endblock main %}
 
+{% block after_body %}
+<script type="module">
+
+  async function digestMessage(message) {
+    const msgUint8 = new TextEncoder().encode(message); // encode as (utf-8) Uint8Array
+    const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8); // hash the message
+    const hashArray = Array.from(new Uint8Array(hashBuffer)); // convert buffer to byte array
+    const hashHex = hashArray
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(""); // convert bytes to hex string
+    return hashHex;
+  }
+
+  window.set_active = function(target) {
+    document.querySelectorAll('.main_tab').forEach(el => el.classList.remove('active'));
+    target.classList.add('active');
+  }
+
+  htmx.onLoad(function(target) {
+    if (target.id == "tab_content") {
+      vim.open({debug: false})
+    }
+  });
+
+  document.addEventListener('DOMContentLoaded', function() {
+    vim.open({debug: false})
+  });
+
+  htmx.on('htmx:beforeRequest', function(evt) {
+    let sqlTextarea = document.getElementById('sql');
+    if (!sqlTextarea) {
+      return
+    }
+    let sql = sqlTextarea.value;
+    let sql_history = localStorage.getItem('sql-history');
+    let history = sql_history ? JSON.parse(sql_history) : {};
+
+    if (sql) {
+      let hash = digestMessage(sql).then((digestHex) => {
+        if (history["hash"] === undefined) {
+          history["hash"] = {};
+          history["history"] = [];
+        }
+        history["hash"][digestHex] = sql;
+
+        for (let i = 0; i < history["history"].length; i++) {
+          if (history["history"][i] === digestHex) {
+            history["history"].splice(i, 1);
+            break;
+          }
+        }
+        history["history"].unshift(digestHex);
+
+        localStorage.setItem('sql-history', JSON.stringify(history));
+      });
+    }
+
+  });
+
+</script>
+
+{% endblock %}

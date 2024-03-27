@@ -1,0 +1,30 @@
+<main id="tab_content" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
+  <div class="flex justify-between mb-4">
+    <div>
+      <div class="overflow-x-auto">
+      <table class="table">
+          <!-- head -->
+          <thead>
+              <tr>
+                  <th></th>
+                  <th>SQL</th>
+                  <th></th>
+              </tr>
+          </thead>
+          <tbody>
+              {% for sql in history %}
+              <tr>
+                  <td><a class="btn btn-sm" onclick="QUERIER.render(this)"
+                    data-command-1='{"action": "select_tab", "target": "#query_tab"}'
+                    data-command-2='{"target": "#tab_content", "path": "/query", "sql": {{sql|tojson}} }' 
+                    >query</a></td>
+                  <td><pre>{{sql}}</pre></td>
+              </tr>
+              {% endfor %}
+          </tbody>
+      </table>
+      </div>
+      
+    </div>
+  </div>
+</main>

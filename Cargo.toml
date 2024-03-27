@@ -1,5 +1,6 @@
 [workspace]
 members = ["libquerier", "querier"]
+exclude = ["querier-ui"]
 resolver = "2"
 
 [workspace.dependencies]

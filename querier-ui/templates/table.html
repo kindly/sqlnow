@@ -1,0 +1,49 @@
+
+<main id="tab_content" role="main" class="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
+  <form autocomplete="off" method="post" action="/outputs">
+  <div>
+    <div class="flex justify-between mb-4">
+      <div>
+        {% if page_type == "table" %}
+          <a class="btn btn-xs" onclick="QUERIER.render(this)" 
+             data-command='{"target": "#tab_content", "path": {{"/table/"|concat(name)|tojson}}, "new_sql": "select_star" }'
+          >SELECT *</a>
+          <a class="btn btn-xs" onclick="QUERIER.render(this)"
+             data-command='{"target": "#tab_content", "path": {{"/table/"|concat(name)|tojson}}, "new_sql": "select_fields" }'
+          >SELECT fields</a>
+        {% endif %}
+      </div>
+      <div>
+        <span>Display Limit:</span>
+        <input class="input input-bordered input-xs w-20" id="display_limit" name="display_limit" value="{{display_limit}}">
+      </div>
+    </div>
+
+    <textarea 
+      style="font-family: monospace; height: 500px" 
+      class="w-full p-2 border border-slate-300 rounded-md mb-2" 
+      onblur="window.localStorage.setItem('querier-sql-{{page_type}}-{{ name }}', this.value)"
+      placeholder="Enter your sql" 
+      id="sql" 
+      name='sql'>{{ sql }}</textarea>
+
+    <div class="flex justify-between">
+      <a class="btn btn-primary btn-sm btn-active"
+      onclick="QUERIER.render(this)"
+      data-command='{"action": "get_results", "target": "#results", "page_type": {{ page_type|tojson }}, "name": {{ name|tojson }} }'
+      >Run
+      </a>
+
+      <div>
+        <input class="btn btn-sm" type="submit" name="csv" value="CSV"/>
+        <input class="btn btn-sm" type="submit" name="tab" value="Tab delimited"/>
+        <input class="btn btn-sm" type="submit" name="jsonl" value="JSONL Stream"/>
+      </div>
+    </div> 
+    <span id="results-spinner" class="hidden relative top-2 htmx-indicator loading loading-spinner loading-md"></span>
+  </div>
+  {% include "results.html" %}
+
+  </form>
+
+</main>

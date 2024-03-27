@@ -1,0 +1,26 @@
+<div>
+  <div class="flex justify-between mb-4">
+    <div>
+      <input type="hidden" name="current_tab" value="{{current_tab.name}}"></input>
+
+        <div class="overflow-x-auto">
+        <table class="table">
+            <!-- head -->
+            <thead>
+                <tr>
+                    <th>SQL</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sql in history %}
+                <tr>
+                    <td><pre>{{sql}}</pre></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+      
+    </div>
+  </div>
+</div>

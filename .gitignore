@@ -5,3 +5,5 @@
 .cargo
 /example_data
 bacon.toml
+.vscode
+/node_modules
