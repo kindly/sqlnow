@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
 
             if file.ends_with(".parquet") || file.ends_with(".csv") {
                 let path_buf = std::path::PathBuf::from(&input.uri);
-                if !path_buf.exists() {
+                if !input.uri.starts_with("s3://") && !path_buf.exists() {
                     return Err(eyre::eyre!("File {} does not exist", input.uri))
                 }
 
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
 
             if file.ends_with(".parquet") || file.ends_with(".csv") {
                 let path_buf = std::path::PathBuf::from(&input.uri);
-                if !path_buf.exists() {
+                if !input.uri.starts_with("s3://") && !path_buf.exists() {
                     return Err(eyre::eyre!("File {} does not exist", input.uri))
                 }
 
@@ -121,46 +121,6 @@ async fn main() -> Result<()> {
     }
 
 
-
-
-    // if let Some(databases) = cli.postgres {
-    //     for database in databases.iter() {
-    //         if let Some(index)  = database.find("=") {
-    //             if database.len() > index+1 {
-    //                 let database_name = database.get(0..index).expect("checked length").to_owned();
-    //                 let connection_string = database.get(index+1..).expect("checked length").to_owned();
-    //                 external_databases.push(ExternalDatabase {
-    //                     name: database_name,
-    //                     connection_string,
-    //                     db_type: DbType::Postgres,
-    //                 });
-    //             } else {
-    //                 return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
-    //         } else {
-    //             return Err(eyre::eyre!("Database should be in the format name=connection_string"))
-    //         }
-    //     }
-    // }
-
-    // if let Some(databases) = cli.sqlite {
-    //     for database in databases.iter() {
-    //         if let Some(index)  = database.find("=") {
-    //             if database.len() > index+1 {
-    //                 let database_name = database.get(0..index).expect("checked length").to_owned();
-    //                 let connection_string = database.get(index+1..).expect("checked length").to_owned();
-    //                 external_databases.push(ExternalDatabase {
-    //                     name: database_name,
-    //                     connection_string,
-    //                     db_type: DbType::Sqlite,
-    //                 });
-    //             } else {
-    //                 return Err(eyre::eyre!("Database should be in the format name=connection_string"))}
-    //         } else {
-    //             return Err(eyre::eyre!("Database should be in the format name=connection_string"))
-    //         }
-    //     }
-    // }
-
     let config = Config {
         database: cli.db,
         views,
@@ -168,7 +128,9 @@ async fn main() -> Result<()> {
         tables,
     };
 
-    let app_data = get_app_data(config).await?;
+    let app_data = tokio::task::spawn_blocking(||
+        get_app_data(config)
+    ).await??;
 
     let host = match env::var("HOST") {
         Ok(val) => val,

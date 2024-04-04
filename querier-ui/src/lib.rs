@@ -199,6 +199,7 @@ pub async fn render(element: JsValue) -> Result<(), JsValue>{
 struct Queries {
     select_star: String,
     select_fields: String,
+    select_fields_type: String,
 }
 
 async fn table(args: HashMap<String, String>) -> Result<String, JsValue> {
@@ -235,6 +236,9 @@ async fn table(args: HashMap<String, String>) -> Result<String, JsValue> {
                 }
                 "select_fields" => {
                     sql = queries.select_fields.clone();
+                }
+                "select_fields_type" => {
+                    sql = queries.select_fields_type.clone();
                 }
                 _ => {}
             }

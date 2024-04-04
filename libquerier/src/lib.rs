@@ -1,3 +1,8 @@
+mod excel;
+mod json;
+
+use excel::load_xlsx;
+use json::load_json;
 use actix_web::error::{ErrorBadRequest, ErrorInternalServerError};
 use actix_web::{
     error::Error, get, post, web, web::ServiceConfig, Either, HttpResponse, Responder, web::Bytes
@@ -34,12 +39,14 @@ pub struct Input {
 
 impl Input {
     pub fn is_database(&self) -> bool {
-        self.uri.starts_with("postgresql://") || self.uri.starts_with("sqlite://")
+        self.uri.starts_with("postgresql://") || self.uri.starts_with("sqlite://") || self.uri.ends_with(".db") || self.uri.ends_with(".sqlite")
     }
     pub fn db_type(&self) -> DbType {
         if self.uri.starts_with("postgresql://") {
             DbType::Postgres
         } else if self.uri.starts_with("sqlite://") {
+            DbType::Sqlite
+        } else if self.uri.ends_with(".db") || self.uri.ends_with(".sqlite") {
             DbType::Sqlite
         } else {
             unreachable!()
@@ -90,7 +97,8 @@ pub struct TableData {
 #[derive(Clone)]
 pub struct AppData {
     pub config: Config,
-    pub connection: Arc<Mutex<Connection>>,
+    pub connection: Option<Arc<Mutex<Connection>>>,
+    pub db: Option<String>,
     pub tabs: Vec<Tab>,
     pub sections: Vec<String>,
     pub env: Environment<'static>,
@@ -102,7 +110,7 @@ pub struct History {
     pub history: Vec<String>,
 }
 
-pub async fn get_app_data(config: Config) -> Result<AppData> {
+pub fn get_app_data(config: Config) -> Result<AppData> {
     
     let mut env = Environment::new();
 
@@ -116,17 +124,22 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
         }
     }
 
-    //let connection = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+    env.add_filter("pad", |field: String, number: usize| {
+        " ".repeat((number+4)-field.len())
+    });
+
+    let mut db = None;
+
     let connection = match config.database.clone() {
-        Some(db) => {
-            Connection::open(db).unwrap()
+        Some(db_path) => {
+            db = Some(db_path.clone());
+            Connection::open(db_path).unwrap()
         }
         None => {
             Connection::open_in_memory().unwrap()
         }
     };
 
-    //Arc::new(Mutex::new(Connection::open(db).unwrap()))
 
     connection
         .execute_batch(
@@ -143,6 +156,9 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
     if config.drop {
         for input in config.tables.iter().chain(config.views.iter()) {
             if input.is_database() {
+                continue;
+            }
+            if input.uri.ends_with(".xlsx") || input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
                 continue;
             }
             match connection.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\";", input.name)) {
@@ -170,6 +186,8 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
             } else if input.uri.starts_with("sqlite://") {
                 connection_string = input.uri.replace("sqlite://", "");
                 "SQLITE"
+            } else if input.uri.ends_with(".db") || input.uri.ends_with(".sqlite") {
+                "SQLITE"
             } else {
                 return Err(eyre::eyre!("Database type not supported"));
             };
@@ -191,6 +209,10 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
                         "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
                         input.name, input.uri
                     ))?;
+            } else if input.uri.ends_with(".xlsx") {
+                return Err(eyre::eyre!("XLSX not supported for views"));
+            } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {   
+                return Err(eyre::eyre!("json not supported for views"));
             }
         }
     }
@@ -212,6 +234,10 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
                     "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
                     input.name, input.uri
                 ))?
+        } else if input.uri.ends_with(".xlsx") {
+            load_xlsx(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
+        } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
+            load_json(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
         }
     }
 
@@ -306,19 +332,23 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
 
         if external_database.is_some() || !schema.is_empty() {
 
-            let db_type = external_database.unwrap().db_type();
+            if external_database.is_some() {
+                let db_type = external_database.unwrap().db_type();
 
-            match db_type {
-                DbType::Postgres => {
-                    if schema != "public" {
-                        db_name.push_str(&format!("\"{}\".", schema));
+                match db_type {
+                    DbType::Postgres => {
+                        if schema != "public" {
+                            db_name.push_str(&format!("\"{}\".", schema));
+                        }
+                    }
+                    DbType::Sqlite => {
+                        if schema != "main" {
+                            db_name.push_str(&format!("\"{}\".", schema));
+                        }
                     }
                 }
-                DbType::Sqlite => {
-                    if schema != "main" {
-                        db_name.push_str(&format!("\"{}\".", schema));
-                    }
-                }
+            } else {
+                db_name.push_str(&format!("\"{}\".", schema));
             }
 
         }
@@ -362,7 +392,8 @@ pub async fn get_app_data(config: Config) -> Result<AppData> {
 
     Ok(AppData {
         config,
-        connection: Arc::new(Mutex::new(connection)),
+        connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
+        db: db,
         tabs,
         sections: section_list,
         env,
@@ -492,6 +523,7 @@ struct TableResponse {
     table: String,
     select_star: String,
     select_fields: String,
+    select_fields_type: String,
 }
 
 #[post("/table.json")]
@@ -500,11 +532,13 @@ async fn table(app_data: web::Data<AppData>, post_data: web::Form<TableRequest>)
 
     let select_star = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectStar);
     let select_fields = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectFields);
+    let select_fields_type = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectFieldsType);
 
     Ok(HttpResponse::Ok().json(TableResponse {
         table: table.name.clone(),
         select_star,
         select_fields,
+        select_fields_type
     }))
 }
 
@@ -524,7 +558,15 @@ struct SqlResponse {
 async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest>) -> Result<impl Responder, Error> {
     let sql = post_data.sql.clone();
 
-    let conn = app_data.connection.lock().await;
+    let mutexed_connection = if app_data.connection.is_some() {
+        app_data.connection.clone().unwrap()
+    } else if app_data.db.is_some() {
+        Arc::new(Mutex::new(Connection::open(app_data.db.clone().unwrap()).unwrap()))
+    } else {
+        return Err(ErrorBadRequest("No database connection"));
+    };
+
+    let conn = mutexed_connection.lock().await;
 
     let table_data = if sql.is_empty() {
         Ok(TableData { headers: vec![], rows: vec![] })
@@ -608,13 +650,17 @@ async fn outputs(
 enum SqlType {
     SelectStar,
     SelectFields,
+    SelectFieldsType,
 }
 
 fn generate_sql(app_data: &AppData, schema: &TableMeta, sql_type: SqlType) -> String {
     let template = match sql_type {
         SqlType::SelectStar => "select_star.sql",
         SqlType::SelectFields => "table_schema.sql",
+        SqlType::SelectFieldsType => "table_with_types.sql",
     };
+
+    let max_field_length = schema.fields.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
 
     let sql_tmpl = app_data
         .env
@@ -624,6 +670,7 @@ fn generate_sql(app_data: &AppData, schema: &TableMeta, sql_type: SqlType) -> St
     sql_tmpl
         .render(&context! {
             schema  => schema,
+            max_field_length => max_field_length,
         })
         .expect("should render")
 }
@@ -704,7 +751,16 @@ async fn post_sql(
         .get_template("layout.html")
         .expect("template exists");
 
-    let conn = app_data.connection.lock().await;
+
+    let mutexed_connection = if app_data.connection.is_some() {
+        app_data.connection.clone().unwrap()
+    } else if app_data.db.is_some() {
+        Arc::new(Mutex::new(Connection::open(app_data.db.clone().unwrap()).unwrap()))
+    } else {
+        return Err(ErrorBadRequest("No database connection"));
+    };
+
+    let conn = mutexed_connection.lock().await;
 
     let other_sql_list: Vec<(String, String)> = other_sql
         .iter()
@@ -788,9 +844,18 @@ async fn output_stream(
     output: OutputFormat,
 ) -> Result<impl Responder, Error> {
 
+    let mutexed_connection = if app_data.connection.is_some() {
+        app_data.connection.clone().unwrap()
+    } else if app_data.db.is_some() {
+        Arc::new(Mutex::new(Connection::open(app_data.db.clone().unwrap()).unwrap()))
+    } else {
+        return Err(ErrorBadRequest("No database connection"));
+    };
+
     let output_stream = stream! {
 
-        let conn = app_data.connection.lock().await;
+        let conn = mutexed_connection.lock().await;
+
         let mut prepared = conn.prepare(&sql).unwrap();
         let mut db_rows = prepared.query([]).unwrap();
 

@@ -11,6 +11,9 @@
           <a class="btn btn-xs" onclick="QUERIER.render(this)"
              data-command='{"target": "#tab_content", "path": {{"/table/"|concat(name)|tojson}}, "new_sql": "select_fields" }'
           >SELECT fields</a>
+          <a class="btn btn-xs" onclick="QUERIER.render(this)"
+             data-command='{"target": "#tab_content", "path": {{"/table/"|concat(name)|tojson}}, "new_sql": "select_fields_type" }'
+          >SELECT fields with types</a>
         {% endif %}
       </div>
       <div>
