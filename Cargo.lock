@@ -1144,9 +1144,9 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "duckdb"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e0288a770d9d49f8d262573c00c7c78aa3f1d3df8935a23fef881dc8da7b277"
+checksum = "91064bc413bb2db36005516878ab585da67e9b093956e1af1b6e036a2a9cfa4f"
 dependencies = [
  "arrow",
  "calamine 0.22.1",
@@ -1875,9 +1875,9 @@ checksum = "9c198f91728a82281a64e1f4f9eeb25d82cb32a5de251c6bd1b5154d63a8e7bd"
 
 [[package]]
 name = "libduckdb-sys"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5c3ce660d33747e6c88abacc209abfe906d94ed6962795985abe55758ce076c"
+checksum = "472e81a731bd70f22d81968fca6fb95bcce6ef5bda7e48b09574d41a6fda726b"
 dependencies = [
  "autocfg",
  "cc",
@@ -1950,7 +1950,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
-name = "libquerier"
+name = "libsqlite3-sys"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afc22eff61b133b115c6e8c74e818c628d6d5e7a502afea6f64dee076dd94326"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
+name = "libsqlnow"
 version = "0.1.1"
 dependencies = [
  "actix-files",
@@ -1972,17 +1983,6 @@ dependencies = [
  "tokio",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "libsqlite3-sys"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afc22eff61b133b115c6e8c74e818c628d6d5e7a502afea6f64dee076dd94326"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -2622,24 +2622,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "querier"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "clap",
- "csv",
- "eyre",
- "libquerier",
- "minijinja",
- "open",
- "serde",
- "serde_json",
- "tokio",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "quick-xml"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3229,6 +3211,24 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "sqlnow"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "clap",
+ "csv",
+ "eyre",
+ "libsqlnow",
+ "minijinja",
+ "open",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing-subscriber",
+ "url",
+]
 
 [[package]]
 name = "static_assertions"

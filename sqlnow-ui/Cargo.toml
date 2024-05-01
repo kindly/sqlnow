@@ -1,5 +1,5 @@
 [package]
-name = "querier-ui"
+name = "sqlnow-ui"
 version = "0.1.0"
 authors = ["David Raznick <kindly@gmail.com>"]
 edition = "2018"

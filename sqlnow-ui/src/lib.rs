@@ -217,7 +217,7 @@ async fn table(args: HashMap<String, String>) -> Result<String, JsValue> {
 
     let mut sql = window
         .local_storage().unwrap().unwrap()
-        .get_item(&format!("querier-sql-table-{name}")).unwrap().unwrap_or("".to_string());
+        .get_item(&format!("sqlnow-sql-table-{name}")).unwrap().unwrap_or("".to_string());
 
     if sql.is_empty() || args.contains_key("new_sql") {
 
@@ -244,11 +244,11 @@ async fn table(args: HashMap<String, String>) -> Result<String, JsValue> {
             }
             let local_storage = window.local_storage().unwrap().unwrap();
 
-            let existing_sql = local_storage.get_item(&format!("querier-sql-table-{name}")).unwrap().unwrap_or("".to_string());
+            let existing_sql = local_storage.get_item(&format!("sqlnow-sql-table-{name}")).unwrap().unwrap_or("".to_string());
             if !existing_sql.is_empty() {
                 add_to_history(existing_sql);
             }
-            local_storage.set_item(&format!("querier-sql-table-{name}"), &sql).unwrap();
+            local_storage.set_item(&format!("sqlnow-sql-table-{name}"), &sql).unwrap();
         }
     }
 
@@ -272,11 +272,11 @@ async fn query(args: HashMap<String, String>) -> Result<String, JsValue> {
 
     let storage_sql = window
         .local_storage().unwrap().unwrap()
-        .get_item(&format!("querier-sql-query-query")).unwrap().unwrap_or("".to_string());
+        .get_item(&format!("sqlnow-sql-query-query")).unwrap().unwrap_or("".to_string());
 
     let sql = match args.get("sql") {
         Some(sql) => {
-            window.local_storage().unwrap().unwrap().set_item(&format!("querier-sql-query-query"), &sql).unwrap();
+            window.local_storage().unwrap().unwrap().set_item(&format!("sqlnow-sql-query-query"), &sql).unwrap();
             add_to_history(storage_sql.clone());
             sql.clone()
         }
@@ -302,9 +302,9 @@ fn add_to_history(sql: String) {
     let window = web_sys::window().unwrap();
     let local_storage = window.local_storage().unwrap().unwrap();
 
-    local_storage.set_item(&format!("querier-history-{hash}"), &sql).unwrap();
+    local_storage.set_item(&format!("sqlnow-history-{hash}"), &sql).unwrap();
 
-    let history_list = local_storage.get_item("querier-history-list").unwrap().unwrap_or("".to_string());
+    let history_list = local_storage.get_item("sqlnow-history-list").unwrap().unwrap_or("".to_string());
 
     let mut history: Vec<String> = history_list.split(",").map(|s| s.to_string()).filter(|x| !x.is_empty()).collect();
 
@@ -312,7 +312,7 @@ fn add_to_history(sql: String) {
 
     history.insert(0, hash.clone());
 
-    local_storage.set_item("querier-history-list", &history.join(",")).unwrap();
+    local_storage.set_item("sqlnow-history-list", &history.join(",")).unwrap();
 }
 
 async fn get_results(args: HashMap<String, String>) -> Result<String, JsValue> {
@@ -328,7 +328,7 @@ async fn get_results(args: HashMap<String, String>) -> Result<String, JsValue> {
 
     let sql = document.query_selector("#sql")?.unwrap().dyn_into::<HtmlTextAreaElement>()?.value();
 
-    window.local_storage().unwrap().unwrap().set_item(&format!("querier-sql-{page_type}-{name}"), &sql).unwrap();
+    window.local_storage().unwrap().unwrap().set_item(&format!("sqlnow-sql-{page_type}-{name}"), &sql).unwrap();
 
     add_to_history(sql.clone());
 
@@ -352,12 +352,12 @@ fn history() -> String {
     let window = web_sys::window().unwrap();
     let local_storage = window.local_storage().unwrap().unwrap();
 
-    let history_list = local_storage.get_item(&"querier-history-list").unwrap().unwrap_or("".to_string());
+    let history_list = local_storage.get_item(&"sqlnow-history-list").unwrap().unwrap_or("".to_string());
     let history_hash: Vec<String> = history_list.split(",").map(|s| s.to_string()).filter(|x| !x.is_empty()).collect();
 
     let mut history: Vec<String> = vec![];
     for hash in history_hash {
-        let sql = local_storage.get_item(&format!("querier-history-{hash}")).unwrap().unwrap_or("".to_string());
+        let sql = local_storage.get_item(&format!("sqlnow-history-{hash}")).unwrap().unwrap_or("".to_string());
         if sql.is_empty() {
             continue;
         }
@@ -400,7 +400,7 @@ async fn home() -> Result<String, JsValue> {
 
     let sql = window
         .local_storage().unwrap().unwrap()
-        .get_item(&format!("querier-sql-query-query")).unwrap().unwrap_or("".to_string());
+        .get_item(&format!("sqlnow-sql-query-query")).unwrap().unwrap_or("".to_string());
 
     let res = tmpl
         .render(&context! {

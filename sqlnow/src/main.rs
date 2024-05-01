@@ -1,8 +1,8 @@
 use eyre::Result;
 use std::env;
 use clap::Parser;
-use libquerier::Config;
-use libquerier::{main_web, get_app_data, Input};
+use libsqlnow::Config;
+use libsqlnow::{main_web, get_app_data, Input};
 use actix_web::{App, HttpServer, web::Data};
 
 #[derive(Parser, Debug, Clone)]

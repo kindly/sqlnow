@@ -1,5 +1,5 @@
 [package]
-name = "querier"
+name = "sqlnow"
 version = "0.1.0"
 edition = "2021"
 
@@ -16,5 +16,5 @@ serde = {"workspace" = true}
 serde_json = {"workspace" = true}
 url = {"workspace" = true}
 tracing-subscriber = {"workspace" = true}
-libquerier = {path = "../libquerier"}
+libsqlnow = {path = "../libsqlnow"}
 open = "5.1.2"
