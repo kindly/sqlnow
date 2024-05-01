@@ -1,0 +1,3 @@
+cargo watch --no-dot-ignores -s 'cargo run -- -v example_data/example.parquet -v db=sqlite://example_data/sqlite.db' 
+wasm-pack build --target=web --dev -d ../libsqlnow/static/
+

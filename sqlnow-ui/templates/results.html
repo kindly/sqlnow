@@ -1,0 +1,29 @@
+
+<div id="results" class="mt-2">
+
+{% if table_data %}
+  {% if error %}
+    {{ error }}
+  {% else %}
+    <table class="table table-xs table-pin-rows mt-2">
+      <thead>
+        <tr>
+          {% for header in table_data.headers %}
+            <th>{{ header }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in table_data.rows %}
+        <tr>
+          {% for cell in row %}
+          <td class="border border-slate-300 p-1">{{cell}}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endif %}
+
+</div>
