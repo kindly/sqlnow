@@ -132,7 +132,7 @@ pub fn load_xlsx(file: &str, name: &str, tables: &Vec<String>, drop: bool, conne
         for row in rows {
             appender.append_row(appender_params_from_iter(row))?;
         }
-        appender.flush();
+        appender.flush()?;
     }
     Ok(())
 }

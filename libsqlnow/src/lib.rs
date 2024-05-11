@@ -1,15 +1,17 @@
 mod excel;
 mod json;
 
+use duckdb::arrow::array::Array;
 use excel::load_xlsx;
 use json::load_json;
 use actix_web::error::{ErrorBadRequest, ErrorInternalServerError};
 use actix_web::{
     error::Error, get, post, web, web::ServiceConfig, Either, HttpResponse, Responder, web::Bytes
 };
+use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use async_stream::stream;
 use csv::WriterBuilder;
-use duckdb::{params, Connection};
+use duckdb::{Connection};
 use eyre::Result;
 use include_dir::{include_dir, Dir, DirEntry};
 use minijinja::{context, Environment};
@@ -68,6 +70,15 @@ struct DBTable {
     schema: String,
     name: String,
     //table_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DBColumns {
+    catalog: String,
+    schema: String,
+    name: String,
+    column_name: String,
+    data_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,15 +273,30 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
         .prepare("select table_catalog, table_schema, table_name from information_schema.tables 
                        where table_schema not in ('information_schema', 'pg_catalog')")?;
 
-    let mapped_rows = prepared.query_map([], |row| {
+    let db_tables = prepared.query_map([], |row| {
         Ok(DBTable {
             schema: row.get(1)?,
             name: row.get(2)?,
             catalog: row.get(0)?,
         })
     })?;
+
+    let mut prepared = connection
+        .prepare("select table_catalog, table_schema, table_name, column_name, data_type from 
+                      information_schema.columns 
+                      where table_schema not in ('information_schema', 'pg_catalog')")?;
+
+    let db_columns: Vec<_> = prepared.query_map([], |row| {
+        Ok(DBColumns {
+            schema: row.get(1)?,
+            name: row.get(2)?,
+            catalog: row.get(0)?,
+            column_name: row.get(3)?,
+            data_type: row.get(4)?,
+        })
+    })?.collect();
     
-    for row in mapped_rows {
+    for row in db_tables {
         let t = row.expect("should be able to get table");
         let mut fields = vec![];
 
@@ -286,16 +312,19 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
             }
         }
 
-        let mut prepared = connection
-            .prepare("select column_name, data_type from information_schema.columns where table_catalog = ? and table_schema = ? and table_name = ?")?;
-        let iter = prepared
-            .query_map(params![t.catalog, t.schema, t.name], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+        // let mut prepared = connection
+        //     .prepare("select column_name, data_type from information_schema.columns where table_catalog = ? and table_schema = ? and table_name = ?")?;
+        // let iter = prepared
+        //     .query_map(params![t.catalog, t.schema, t.name], |row| {
+        //         Ok((row.get(0)?, row.get(1)?))
+        //     })?;
 
-        for value in iter {
-            let (field_name, type_): (String, String) = value?;
-            fields.push((field_name, type_));
+        for row in db_columns.iter() {
+            let col = row.as_ref().expect("should be able to get column");
+
+            if col.catalog == t.catalog && col.schema == t.schema && col.name == t.name {
+                fields.push((col.column_name.clone(), col.data_type.clone()));
+            }
         }
 
         let schema = if t.schema == "main" && !external_database.is_some() {
@@ -386,6 +415,8 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
         return Err(eyre::eyre!("No tables found"));
     }
 
+    tabs.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut section_list = tabs.iter().filter_map(|t| t.section.clone()).collect::<Vec<String>>();
     section_list.sort();
     section_list.dedup();
@@ -411,7 +442,7 @@ pub fn main_web(service_config: &mut ServiceConfig) {
        .service(outputs);
 }
 
-fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Vec<String> {
+fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Result<Vec<String>> {
     let mut data = vec![];
     for i in 0..headers.len() {
         let value =  match row.get_ref(i).unwrap() {
@@ -434,10 +465,19 @@ fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Vec<String> {
             ValueRef::Blob(blob) => String::from_utf8_lossy(blob).to_string(),
             ValueRef::Date32(date) => date.to_string(),
             ValueRef::Time64(_, b) => b.to_string(),
+            ValueRef::List(array,_) => {
+                let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
+                let mut buffer = String::new();
+                for i in 0..array.len() {
+                    formatter.value(i).write(&mut buffer).unwrap()
+                }
+                buffer
+            },
+            _ => panic!("Type not supported"),
         };
         data.push(value)
     }
-    data
+    Ok(data)
 }
 
 fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<TableData> {
@@ -455,7 +495,7 @@ fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<Table
     let mut count: usize = 0;
 
     while let Some(row) = db_rows.next()? {
-        rows.push(process_row(&row, &headers));
+        rows.push(process_row(&row, &headers)?);
         count += 1;
         if count >= display_limit {
             break;
@@ -877,7 +917,7 @@ async fn output_stream(
         }
 
         while let Some(row) = db_rows.next().map_err(ErrorInternalServerError)? {
-            let row = process_row(&row, &headers);
+            let row = process_row(&row, &headers).map_err(ErrorInternalServerError)?;
             let mut buf = Vec::new();
             match output {
                 OutputFormat::CSV => {
