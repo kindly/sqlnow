@@ -14,6 +14,9 @@ struct Cli {
     #[arg(short, long)]
     view: Option<Vec<String>>,
 
+    #[arg(short, long)]
+    text: bool,
+
     #[arg(long)]
     drop: bool,
 
@@ -125,6 +128,7 @@ async fn main() -> Result<()> {
         database: cli.db,
         views,
         drop: cli.drop,
+        all_text: cli.text,
         tables,
     };
 

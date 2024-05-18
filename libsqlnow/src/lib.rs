@@ -11,7 +11,7 @@ use actix_web::{
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use async_stream::stream;
 use csv::WriterBuilder;
-use duckdb::{Connection};
+use duckdb::Connection;
 use eyre::Result;
 use include_dir::{include_dir, Dir, DirEntry};
 use minijinja::{context, Environment};
@@ -62,6 +62,7 @@ pub struct Config {
     pub views: Vec<Input>,
     pub tables: Vec<Input>,
     pub drop:bool,
+    pub all_text:bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +190,12 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
 
     let mut external_database_map = HashMap::new();
 
+    let all_varchar = if config.all_text {
+        ", all_varchar = true"
+    } else {
+        ""
+    };
+
     for input in config.views.iter() {
         if input.is_database() {
             let mut connection_string = input.uri.clone(); 
@@ -211,8 +218,8 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
             if input.uri.ends_with(".csv") {
                 connection
                     .execute_batch(&format!(
-                        "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
-                        input.name, input.uri 
+                        "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true{all_varchar});",
+                        input.name, input.uri
                     ))?;
             } else if input.uri.ends_with(".parquet") {
                 connection
@@ -236,7 +243,7 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
         if input.uri.ends_with(".csv") {
             connection
                 .execute_batch(&format!(
-                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
+                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true{all_varchar});",
                     input.name, input.uri
                 ))?
         } else if input.uri.ends_with(".parquet") {
