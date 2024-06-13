@@ -24,6 +24,7 @@ use duckdb::types::ValueRef;
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
+static INCLUDE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/include");
 
 #[derive(Debug, Clone, Copy)]
 pub enum DbType {
@@ -441,12 +442,12 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
 pub fn main_web(service_config: &mut ServiceConfig) {
     service_config
        .service(sql_query)
-       .service(ui)
        .service(post_sql)
        .service(static_files)
        .service(tables)
        .service(table)
-       .service(outputs);
+       .service(outputs)
+       .default_service(web::get().to(ui));
 }
 
 fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Result<Vec<String>> {
@@ -512,9 +513,9 @@ fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<Table
     Ok(TableData { headers, rows: rows })
 }
 
-#[get("/static/{filename:.*}")]
+#[get("/assets/{filename:.*}")]
 async fn static_files(filename: web::Path<String>) -> Result<impl Responder, Error> {
-    let data = STATIC_DIR.get_file(filename.as_str()).ok_or(ErrorBadRequest("file not found"))?;
+    let data = STATIC_DIR.get_file("assets/".to_owned() + filename.as_str()).ok_or(ErrorBadRequest("file not found"))?;
     let contents = data.contents();
 
     let content_type = if filename.as_str().ends_with(".css") {
@@ -535,16 +536,24 @@ async fn static_files(filename: web::Path<String>) -> Result<impl Responder, Err
     );
 }
 
-#[get("/")]
-async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
-    let tmpl = app_data
-        .env
-        .get_template("index.html")
-        .expect("template exists");
-    let res = tmpl.render(&context! {}).map_err(|e| ErrorInternalServerError(e))?;
+async fn ui() -> Result<impl Responder, Error> {
+
+    let data = if std::env::var("SQLNOW_DEV").is_ok() {
+        INCLUDE_DIR.get_file("index.html").ok_or(ErrorBadRequest("file not found"))?
+    } else {
+        STATIC_DIR.get_file("index.html").ok_or(ErrorBadRequest("file not found"))?
+    };
+
+    let res = data.contents_utf8().expect("utf8 file");
+    // lt tmpl = app_data
+    //     .env
+    //     .get_template("index.html")
+    //     .expect("template exists");
+    // let res = tmpl.render(&context! {}).map_err(|e| ErrorInternalServerError(e))?;
 
     Ok(HttpResponse::Ok().body(res))
 }
+
 
 #[post("/tables.json")]
 async fn tables(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {

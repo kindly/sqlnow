@@ -14,7 +14,7 @@ struct Cli {
     #[arg(short, long)]
     view: Option<Vec<String>>,
 
-    #[arg(short, long)]
+    #[arg(short = 'x', long)]
     text: bool,
 
     #[arg(long)]

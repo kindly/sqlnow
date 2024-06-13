@@ -128,8 +128,6 @@ pub async fn render(element: JsValue) -> Result<(), JsValue>{
         let name = attr.name();
         let value = attr.value();
 
-        console::log_1(&value.clone().into());
-
         if name.starts_with("data-command") {
             commands.push(Command::from_json(value)?);
         }
