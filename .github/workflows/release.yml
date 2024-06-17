@@ -20,6 +20,10 @@ jobs:
             archive: zip
     steps:
       - uses: actions/checkout@master
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "10.0"
       - name: Compile and release
         uses: rust-build/rust-build.action@v1.4.5
         env:
