@@ -12,6 +12,14 @@ import Table from "./routes/table";
 import Root from './routes/root';
 import History from './routes/history';
 
+let queries = window.localStorage.getItem('sqlnow-queries');
+// let queryIndex = window.localStorage.getItem('sqlnow-queryIndex');
+
+if (!queries) {
+  window.localStorage.setItem('sqlnow-queryLastId', '1');
+  queries = [{"id": 1, "name": "query 1"}];
+  window.localStorage.setItem('sqlnow-queries', JSON.stringify(queries));
+}
 
 const router = createBrowserRouter([
   {
@@ -25,7 +33,7 @@ const router = createBrowserRouter([
         element: <History />,
       },
       {
-        path: "/queries/query",
+        path: "/queries/:query",
         errorElement: <ErrorPage />,
         element: <Query />,
       },

@@ -1,20 +1,30 @@
 import { useNavigate } from "react-router-dom";
-import { addToHistory } from "../utils";
+import { useOutletContext } from "react-router-dom";
 
 export default function History() {
   let history = localStorage.getItem("sqlnow-history-list") || "";
   let historyList = history.split(",").map((s) => s.trim());
   let navigate = useNavigate();
 
+  let {queries, setQueries} = useOutletContext();
+
   function onHistoryClick(sql) {
-    let oldSql = window.localStorage.getItem('sqlnow-sql-query-query');
 
-    if (oldSql) {
-      addToHistory(oldSql);
-    }
+    let id = parseInt(window.localStorage.getItem('sqlnow-queryLastId'));
+    let new_id = id + 1;
 
-    window.localStorage.setItem('sqlnow-sql-query-query', sql);
-    navigate("/queries/query");
+    window.localStorage.setItem('sqlnow-queryLastId', new_id.toString());
+
+    let newQueries = [...queries];
+
+    newQueries.push({"id": new_id, "name": "query " + new_id});
+
+    setQueries(newQueries);
+
+    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    window.localStorage.setItem('sqlnow-sql-query-' + new_id.toString(), sql);
+
+    navigate("/queries/" + new_id.toString() + "#new");
   }
 
   let historyHtml = historyList.map((hash) => {

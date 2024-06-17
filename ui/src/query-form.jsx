@@ -5,6 +5,7 @@ import { addToHistory } from './utils';
 import { DataEditor, GridCellKind } from '@glideapps/glide-data-grid';
 import "@glideapps/glide-data-grid/dist/index.css";
 import { vim } from "@replit/codemirror-vim"
+import { useNavigate } from 'react-router-dom';
 
 import CodeMirror from '@uiw/react-codemirror';
 import { langs } from '@uiw/codemirror-extensions-langs';
@@ -30,7 +31,10 @@ export default function QueryForm(props) {
   let queryType = props.queryType;
   let queryName = props.queryName;
 
-  let tables = useOutletContext();
+  console.log(queryName)
+
+  let {tables, queries, setQueries} = useOutletContext();
+  let navigate = useNavigate();
 
   let schema = undefined;
   let table = undefined;
@@ -40,6 +44,13 @@ export default function QueryForm(props) {
     if (table) {
       schema = table.schema;
     }
+  }
+
+  let query = undefined;
+  let newQueries = undefined;
+  if (queryType == "query" && queries) {
+    newQueries = [...queries];
+    query = newQueries.find((query) => query.id == queryName);
   }
 
   let initialSql = window.localStorage.getItem(`sqlnow-sql-${queryType}-${queryName}`);
@@ -91,9 +102,9 @@ export default function QueryForm(props) {
     setError(resp.error);
   }
 
-  function onSqlChange(e) {
-    window.localStorage.setItem(`sqlnow-sql-${queryType}-${queryName}`, e.target.value)
-    setSql(e.target.value);
+  function onSqlChange(value) {
+    window.localStorage.setItem(`sqlnow-sql-${queryType}-${queryName}`, value)
+    setSql(value);
   }
 
   let columns = useMemo(() => {
@@ -119,7 +130,21 @@ export default function QueryForm(props) {
     }
   }
 
+  function changeName(e) {
+    let newQueries = [...queries];
+    let query = newQueries.find((query) => query.id == queryName);
+    query.name = e.target.value;
+    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    setQueries(newQueries);
+  }
 
+  function deleteQuery() {
+    let newQueries = queries.filter((query) => query.id != queryName);
+    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    setQueries(newQueries);
+    addToHistory(sql)
+    navigate("/queries/" + newQueries[0].id);
+  }
 
   return (
     <main id="tab_content" role="main" className="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
@@ -134,6 +159,13 @@ export default function QueryForm(props) {
                         <a className="btn btn-xs" onClick={() => setSqlFromSchema("select_fields_type")}>SELECT fields with types</a>
                     </>
                   }
+                  {(queryType === "query" && query) &&
+                    <>
+                        <input className="input input-bordered input-xs w-64" id="name" name="name" value={query.name} onChange={changeName}/>
+
+                        <a className="btn btn-xs btn-error ms-8" onClick={deleteQuery}>delete</a>
+                    </>
+                  }
                 </div>
                 <div>
                     <span>Display Limit:</span>
@@ -144,7 +176,7 @@ export default function QueryForm(props) {
             </div>
 
             <input type="hidden" name="sql" value={sql} />
-            <CodeMirror value={sql} height="300px" extensions={[vim(), langs.sql()]} onChange={(value) => setSql(value)} />
+            <CodeMirror value={sql} height="300px" extensions={[vim(), langs.sql()]} onChange={onSqlChange} />
 
             {/* <textarea 
                 style={{"fontFamily": "monospace", "height": "400px"}} 
