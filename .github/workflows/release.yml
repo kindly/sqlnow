@@ -1,35 +1,20 @@
-# .github/workflows/release.yml
+name: Rust
 
 on:
-  release:
-    types: [created]
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: release ${{ matrix.target }}
+  build:
+
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-gnu
-            archive: zip
-          - target: x86_64-unknown-linux-musl
-            archive: tar.gz zip 
-          - target: x86_64-apple-darwin
-            archive: zip
+
     steps:
-      - uses: actions/checkout@master
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "10.0"
-          directory: ${{ runner.temp }}/llvm
-      - name: Compile and release
-        uses: rust-build/rust-build.action@v1.4.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          RUSTTARGET: ${{ matrix.target }}
-          ARCHIVE_TYPES: ${{ matrix.archive }}
-          SRC_DIR: sqlnow
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release
