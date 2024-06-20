@@ -1,0 +1,67 @@
+name: Rust
+
+on:
+  release:
+    types: [created]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release
+    - name: tar.gz
+      run: tar -czf linux-binary.tar.gz --directory=target/release sqlnow 
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./linux-binary.tar.gz
+        asset_name: ${{ format('linux-sqlnow-{0}.tar.gz', github.event.release.name) }}
+        asset_content_type: application/gzip
+
+  build-macos:
+
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release
+    - name: tar.gz
+      run: tar -czf linux-binary.tar.gz --directory=target/release sqlnow 
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./linux-binary.tar.gz
+        asset_name: ${{ format('maxos-arm-sqlnow-{0}.tar.gz', github.event.release.name) }}
+        asset_content_type: application/gzip
+
+  build-windows:
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --release
+      - name: zip
+      run: zip -r windows-binary.zip target/release/sqlnow.exe
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./windows-binary.zip
+        asset_name: ${{ format('windows-sqlnow-{0}.zip', github.event.release.name) }}
+        asset_content_type: application/zip
+
