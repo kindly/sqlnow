@@ -55,7 +55,7 @@ jobs:
     - name: vcpkg install
       run: vcpkg integrate install
     - name: vcpkg
-      run: vcpkg install --triplet x64-windows --package openssl:x64-windows
+      run: vcpkg install openssl
     - name: Build
       run: cargo build --release
     - name: zip
