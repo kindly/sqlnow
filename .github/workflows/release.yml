@@ -49,6 +49,7 @@ jobs:
         asset_content_type: application/gzip
 
   build-windows:
+    runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
     - name: Build
