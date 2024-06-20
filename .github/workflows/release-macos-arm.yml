@@ -10,14 +10,14 @@ env:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
 
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --release
     - name: tar.gz
-      run: tar -czf linux-binary.tar.gz target/release/sqlnow
+      run: tar -czf linux-binary.tar.gz --directory=target/release sqlnow 
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
       env:
@@ -25,5 +25,5 @@ jobs:
       with:
         upload_url: ${{ github.event.release.upload_url }}
         asset_path: ./linux-binary.tar.gz
-        asset_name: ${{ format('linux-sqlnow-{0}.tar.gz', github.event.release.name) }}
+        asset_name: ${{ format('maxos-arm-sqlnow-{0}.tar.gz', github.event.release.name) }}
         asset_content_type: application/gzip
