@@ -56,6 +56,10 @@ jobs:
       run: cargo build --release
     - name: zip
       run: zip -r windows-binary.zip target/release/sqlnow.exe
+    - name: vcpkg install
+      run: vcpkg integrate install
+    - name: vcpkg
+      run: vcpkg install --triplet x64-windows --package openssl:x64-windows
     - name: Upload Release Asset
       uses: actions/upload-release-asset@v1
       env:
@@ -65,4 +69,3 @@ jobs:
         asset_path: ./windows-binary.zip
         asset_name: ${{ format('windows-sqlnow-{0}.zip', github.event.release.name) }}
         asset_content_type: application/zip
-
