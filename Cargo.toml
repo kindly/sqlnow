@@ -14,7 +14,7 @@ serde_json = "1.0.100"
 url = "2.4.0"
 tracing-subscriber = "0.3.17"
 csv = "1.2.2"
-duckdb = { version = "0.10.2", features = ["extensions-full"] }
+duckdb = { version = "0.10.2", features = ["extensions-full", "bundled"] }
 
 #[profile.release]
 #debug = true
