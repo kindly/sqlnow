@@ -52,10 +52,12 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+    - name: vcpkg
+      run: vcpkg install openssl-windows:x64-windows
+    - name: vcpkg
+      run: vcpkg install openssl:x64-windows-static
     - name: vcpkg install
       run: vcpkg integrate install
-    - name: vcpkg
-      run: vcpkg install openssl
     - name: Build
       run: cargo build --release
     - name: zip
@@ -64,6 +66,7 @@ jobs:
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        VCPKGRS_DYNAMIC: '1'
       with:
         upload_url: ${{ github.event.release.upload_url }}
         asset_path: ./windows-binary.zip
