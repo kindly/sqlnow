@@ -52,12 +52,6 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
-    - name: vcpkg
-      run: vcpkg install openssl-windows:x64-windows
-    - name: vcpkg
-      run: vcpkg install openssl:x64-windows-static
-    - name: vcpkg install
-      run: vcpkg integrate install
     - name: Build
       run: cargo build --release
     - name: zip
