@@ -20,7 +20,10 @@ struct Cli {
     #[arg(long)]
     drop: bool,
 
+    #[arg(short, long)]
     db: Option<String>,
+
+    files: Option<Vec<String>>,
 }
 
 // foo.xlsx
@@ -120,6 +123,26 @@ async fn main() -> Result<()> {
                 }
             }
             tables.push(input);
+        }
+    }
+
+    if let Some(cli_files) = cli.files {
+        for file in cli_files.iter() {
+            let mut input = input_into_parts(file);
+            if file.ends_with(".parquet") || file.ends_with(".csv") {
+                let path_buf = std::path::PathBuf::from(file);
+                if !input.uri.starts_with("s3://") && !path_buf.exists() {
+                    return Err(eyre::eyre!("File {} does not exist", input.uri))
+                }
+                if input.name.is_empty() {
+                    input.name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+                }
+            }
+            if file.ends_with(".xlsx") || file.ends_with(".json") || file.ends_with(".jsonl") {
+                tables.push(input);
+            } else {
+                views.push(input);
+            }
         }
     }
 
