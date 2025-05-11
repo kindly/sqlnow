@@ -20,7 +20,7 @@ use serde_json::{self, json};
 use std::collections::HashMap;
 use std::{sync::Arc, vec};
 use tokio::sync::Mutex;
-use duckdb::types::ValueRef;
+use duckdb::types::{ListType, ValueRef};
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
@@ -474,12 +474,25 @@ fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Result<Vec<String>> 
             ValueRef::Date32(date) => date.to_string(),
             ValueRef::Time64(_, b) => b.to_string(),
             ValueRef::List(array,_) => {
-                let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
-                let mut buffer = String::new();
-                for i in 0..array.len() {
-                    formatter.value(i).write(&mut buffer).unwrap()
+                match array {
+                    ListType::Regular(array) => {
+                        let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
+                        let mut buffer = String::new();
+                        for i in 0..array.len() {
+                            formatter.value(i).write(&mut buffer).unwrap()
+                        }
+                        buffer
+                    }
+                    ListType::Large(array) => {
+                        let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
+                        let mut buffer = String::new();
+                        for i in 0..array.len() {
+                            formatter.value(i).write(&mut buffer).unwrap()
+                        }
+                        buffer
+                    }
                 }
-                buffer
+
             },
             _ => panic!("Type not supported"),
         };
