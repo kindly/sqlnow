@@ -1,13 +1,20 @@
 use eyre::Result;
 use std::env;
-use clap::Parser;
-use libsqlnow::Config;
-use libsqlnow::{main_web, get_app_data, Input};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use clap::{Parser, Subcommand, ValueEnum};
+use libsqlnow::{
+    default_name_and_check, get_app_data, input_into_parts, main_web, query_database,
+    sidecar_path, sniff_db_type, validate_name, Config, DbType, Input, Session, TableData,
+};
 use actix_web::{App, HttpServer, web::Data};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     #[arg(short, long)]
     table: Option<Vec<String>>,
 
@@ -20,6 +27,8 @@ struct Cli {
     #[arg(long)]
     drop: bool,
 
+    /// DuckDB database to open as the main database. A DuckDB file given as
+    /// the first positional argument is used the same way.
     #[arg(short, long)]
     db: Option<String>,
 
@@ -27,7 +36,66 @@ struct Cli {
     #[arg(short, long)]
     save: Option<String>,
 
+    /// Pre-defined query, repeatable: "name=SELECT ..." or bare SQL
+    /// (the name is auto-generated when omitted)
+    #[arg(short = 'q', long = "query")]
+    query: Vec<String>,
+
+    /// Pre-defined query read from a file, repeatable: "name=path.sql" or
+    /// "path.sql" (the file stem becomes the name)
+    #[arg(long = "query-file")]
+    query_file: Vec<String>,
+
+    /// Open the browser on startup. With a name, also start on that query:
+    /// --open "top customers"
+    #[arg(long, num_args = 0..=1)]
+    open: Option<Option<String>>,
+
     files: Option<Vec<String>>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    /// Run SQL against a DuckDB database file (the main database sqlnow
+    /// created or was pointed at) — like the duckdb CLI, but with sidecar
+    /// attaches replayed so cross-database queries keep working:
+    ///   sqlnow sql data.duckdb "SELECT count(*) FROM sales"
+    Sql {
+        /// Path to the DuckDB database file
+        database: String,
+        /// SQL to run (multiple statements allowed; only a single statement returns rows)
+        sql: String,
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = SqlFormat::Box)]
+        format: SqlFormat,
+        /// Maximum rows returned (default: all)
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
+    /// Run SQL against a session (.sqlnow) file. The file is created with
+    /// the session schema if it does not exist, so agents can seed queries
+    /// without any duckdb installation:
+    ///   sqlnow exec session.sqlnow "INSERT INTO queries(pos, name, sql) VALUES (1, 'peek', 'SELECT 1')"
+    Exec {
+        /// Path to the session file
+        session: String,
+        /// SQL to run (multiple statements allowed; only a single statement returns rows)
+        sql: String,
+        /// Output format
+        #[arg(short, long, value_enum, default_value_t = SqlFormat::Csv)]
+        format: SqlFormat,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy)]
+enum SqlFormat {
+    /// duckdb-style table
+    Box,
+    Csv,
+    /// array of objects
+    Json,
+    /// one object per line
+    Jsonl,
 }
 
 // foo.xlsx
@@ -37,200 +105,188 @@ struct Cli {
 // *
 // moo.csv
 
-fn input_into_parts(input: &str) -> Input {
-    let mut name = "".to_owned();
-    let uri: String;
-    let mut hash = Vec::new();
+/// A plain path (no name=, #tables, or scheme) whose file is a DuckDB
+/// database. Given as the first positional argument, it becomes the main
+/// database like --db. A missing file only qualifies with an unambiguous
+/// DuckDB extension, matching --db's create-if-absent behaviour; .db files
+/// are shared with sqlite so an existing file's header decides.
+fn main_duckdb_candidate(file: &str) -> bool {
+    if file.contains('=') || file.contains('#') || file.contains("://") {
+        return false;
+    }
+    let exists = std::path::Path::new(file).exists();
+    if file.ends_with(".duckdb") || file.ends_with(".ddb") {
+        return !exists || sniff_db_type(file) == Some(DbType::DuckDb);
+    }
+    if file.ends_with(".db") {
+        return exists && sniff_db_type(file) == Some(DbType::DuckDb);
+    }
+    false
+}
 
-    let not_name: String;
-
-    match input.split_once('='){
-        Some((start, end)) => {
-            name = start.to_owned();
-            not_name = end.to_owned();
-        },
-        None => {
-            not_name = input.to_owned();
+/// "name=SELECT ..." when the part before the first '=' is a valid query
+/// name, otherwise the whole spec is SQL.
+fn parse_query_spec(spec: &str) -> (Option<String>, String) {
+    if let Some((name, sql)) = spec.split_once('=') {
+        if validate_name(name).is_ok() {
+            return (Some(name.to_string()), sql.to_string());
         }
     }
+    (None, spec.to_string())
+}
 
-    match not_name.rsplit_once('#') {
-        Some((start, end)) => {
-            uri = start.to_owned();
+/// "name=path.sql" or "path.sql" (name defaults to the file stem).
+fn parse_query_file_spec(spec: &str) -> Result<(String, String)> {
+    let (name, path) = match spec.split_once('=') {
+        Some((name, path)) if validate_name(name).is_ok() => (Some(name.to_string()), path.to_string()),
+        _ => (None, spec.to_string()),
+    };
+    let sql = std::fs::read_to_string(&path)
+        .map_err(|e| eyre::eyre!("Cannot read query file {}: {}", path, e))?;
+    let name = match name {
+        Some(name) => name,
+        None => PathBuf::from(&path)
+            .file_stem()
+            .ok_or_else(|| eyre::eyre!("Cannot derive a query name from {}", path))?
+            .to_string_lossy()
+            .to_string(),
+    };
+    Ok((name, sql))
+}
 
-            if !end.is_empty(){
-                let mut reader = csv::ReaderBuilder::new()
-                    .has_headers(false)
-                    .from_reader(end.as_bytes());
-
-                for record in reader.records() {
-                    let record = record.unwrap();
-                    for field in record.iter() {
-                        hash.push(field.to_owned());
-                    }
-                    break
-                }
-
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
             }
-        },
-        None => {
-            uri = not_name.to_owned();
-        }
-    }
+            _ => format!("%{:02X}", b),
+        })
+        .collect()
+}
 
-    return Input {
-        name,
-        uri,
-        tables: hash
+fn json_value(row: &[String], headers: &[String]) -> String {
+    let mut out = String::from("{");
+    for (i, header) in headers.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(header).expect("string serializes"));
+        out.push(':');
+        out.push_str(&serde_json::to_string(&row[i]).expect("string serializes"));
+    }
+    out.push('}');
+    out
+}
+
+fn print_box(table: &TableData) {
+    const MAX_CELL: usize = 80;
+    let clean = |value: &str| {
+        let value = value.replace('\n', "\\n");
+        if value.chars().count() > MAX_CELL {
+            let truncated: String = value.chars().take(MAX_CELL - 1).collect();
+            format!("{}…", truncated)
+        } else {
+            value
+        }
     };
 
+    let mut widths: Vec<usize> = table.headers.iter().map(|h| clean(h).chars().count()).collect();
+    let rows: Vec<Vec<String>> = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    let cell = clean(cell);
+                    widths[i] = widths[i].max(cell.chars().count());
+                    cell
+                })
+                .collect()
+        })
+        .collect();
+
+    let line = |left: &str, mid: &str, right: &str| {
+        let segments: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        println!("{}{}{}", left, segments.join(mid), right);
+    };
+    let row_line = |cells: &[String]| {
+        let padded: Vec<String> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| format!(" {}{} ", cell, " ".repeat(widths[i] - cell.chars().count())))
+            .collect();
+        println!("│{}│", padded.join("│"));
+    };
+
+    line("┌", "┬", "┐");
+    row_line(&table.headers.iter().map(|h| clean(h)).collect::<Vec<_>>());
+    line("├", "┼", "┤");
+    for row in &rows {
+        row_line(row);
+    }
+    line("└", "┴", "┘");
+    let count = table.rows.len();
+    println!("({} {})", count, if count == 1 { "row" } else { "rows" });
 }
 
-fn default_name_and_check(input: &mut Input) -> Result<()> {
-    let local = input.uri.ends_with(".parquet")
-        || input.uri.ends_with(".csv")
-        || input.uri.ends_with(".db")
-        || input.uri.ends_with(".sqlite")
-        || input.uri.starts_with("sqlite://");
-    if !local {
+fn print_table(table: &TableData, format: SqlFormat) -> Result<()> {
+    if table.headers.is_empty() {
         return Ok(());
     }
-
-    let path = input.uri.strip_prefix("sqlite://").unwrap_or(&input.uri);
-    let path_buf = std::path::PathBuf::from(path);
-
-    if !input.uri.starts_with("s3://") && !path_buf.exists() {
-        return Err(eyre::eyre!("File {} does not exist", path));
-    }
-
-    if input.name.is_empty() {
-        let mut name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
-        // duckdb reserves these as attached database names
-        if ["main", "system", "temp"].contains(&name.as_str()) {
-            name = format!("{}_db", name);
+    match format {
+        SqlFormat::Box => print_box(table),
+        SqlFormat::Csv => {
+            let mut writer = csv::Writer::from_writer(std::io::stdout());
+            writer.write_record(&table.headers)?;
+            for row in &table.rows {
+                writer.write_record(row)?;
+            }
+            writer.flush()?;
         }
-        input.name = name;
-    }
-
-    Ok(())
-}
-
-fn local_db_path(uri: &str) -> Option<String> {
-    if let Some(path) = uri.strip_prefix("sqlite://") {
-        return Some(path.to_string());
-    }
-    if !uri.contains("://") && (uri.ends_with(".db") || uri.ends_with(".sqlite")) {
-        return Some(uri.to_string());
-    }
-    None
-}
-
-fn absolute_uri(uri: &str) -> String {
-    if let Some(path) = uri.strip_prefix("sqlite://") {
-        match std::fs::canonicalize(path) {
-            Ok(abs) => format!("sqlite://{}", abs.display()),
-            Err(_) => uri.to_string(),
+        SqlFormat::Json => {
+            let body: Vec<String> = table.rows.iter().map(|row| json_value(row, &table.headers)).collect();
+            println!("[{}]", body.join(","));
         }
-    } else if uri.contains("://") {
-        uri.to_string()
-    } else {
-        match std::fs::canonicalize(uri) {
-            Ok(abs) => abs.display().to_string(),
-            Err(_) => uri.to_string(),
-        }
-    }
-}
-
-fn sidecar_path(anchor: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("{}.sqlnow", anchor))
-}
-
-fn random_id() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time after epoch")
-        .as_nanos();
-    hasher.write_u128(nanos);
-    format!("{:016x}", hasher.finish())
-}
-
-fn read_sidecar(path: &std::path::Path) -> Result<(Option<String>, Vec<(String, Input)>)> {
-    let content = std::fs::read_to_string(path)?;
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let mut id = None;
-    let mut entries = vec![];
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (kind, spec) = line
-            .split_once(char::is_whitespace)
-            .ok_or_else(|| eyre::eyre!("Invalid line in {}: {}", path.display(), line))?;
-        if kind == "id" {
-            id = Some(spec.trim().to_string());
-            continue;
-        }
-        if kind != "view" && kind != "table" {
-            return Err(eyre::eyre!("Invalid line in {}: {}", path.display(), line));
-        }
-
-        let mut input = input_into_parts(spec.trim());
-
-        // hand-edited sidecars may use paths relative to the sidecar's directory
-        if let Some(local) = local_db_path(&input.uri).or_else(|| {
-            (!input.uri.contains("://")).then(|| input.uri.clone())
-        }) {
-            let local_buf = std::path::PathBuf::from(&local);
-            if local_buf.is_relative() {
-                let joined = dir.join(local_buf).to_string_lossy().to_string();
-                input.uri = if input.uri.starts_with("sqlite://") {
-                    format!("sqlite://{}", joined)
-                } else {
-                    joined
-                };
+        SqlFormat::Jsonl => {
+            for row in &table.rows {
+                println!("{}", json_value(row, &table.headers));
             }
         }
-
-        if let Err(e) = default_name_and_check(&mut input) {
-            eprintln!("Skipping sidecar entry from {}: {}", path.display(), e);
-            continue;
-        }
-
-        entries.push((kind.to_string(), input));
     }
-
-    Ok((id, entries))
+    Ok(())
 }
 
-fn write_sidecar(path: &std::path::Path, id: &str, entries: &[(String, Input)]) -> Result<()> {
-    let mut content = String::from(
-        "# sqlnow auto-attach file. Inputs listed here are attached on startup.\n\
-         # Format: view|table name=uri#table1,table2\n",
-    );
-    content.push_str(&format!("id {}\n", id));
-    for (kind, input) in entries {
-        content.push_str(&format!("{} {}={}", kind, input.name, absolute_uri(&input.uri)));
-        if !input.tables.is_empty() {
-            content.push_str(&format!("#{}", input.tables.join(",")));
-        }
-        content.push('\n');
-    }
-    std::fs::write(path, content)?;
-    Ok(())
+fn run_exec(session_path: &str, sql: &str, format: SqlFormat) -> Result<()> {
+    let session = Session::open(std::path::Path::new(session_path))?;
+    let table_data = session.raw_sql(sql)?;
+    print_table(&table_data, format)
+}
+
+fn run_sql(db_path: &str, sql: &str, format: SqlFormat, limit: Option<usize>) -> Result<()> {
+    let table_data = query_database(db_path, sql, limit.unwrap_or(usize::MAX))?;
+    print_table(&table_data, format)
 }
 
 #[actix_web::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    match &cli.command {
+        Some(Command::Exec { session, sql, format }) => {
+            return run_exec(session, sql, *format);
+        }
+        Some(Command::Sql { database, sql, format, limit }) => {
+            return run_sql(database, sql, *format, *limit);
+        }
+        None => {}
+    }
+
     let mut views = vec![];
     let mut tables = vec![];
 
-    if let Some(cli_views) = cli.view {
+    if let Some(cli_views) = &cli.view {
         for file in cli_views.iter() {
             let mut input = input_into_parts(file);
             default_name_and_check(&mut input)?;
@@ -238,7 +294,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    if let Some(cli_tables) = cli.table {
+    if let Some(cli_tables) = &cli.table {
         for file in cli_tables.iter() {
             let mut input = input_into_parts(file);
             default_name_and_check(&mut input)?;
@@ -247,9 +303,15 @@ async fn main() -> Result<()> {
     }
 
     let mut sidecar_files = vec![];
+    let mut db = cli.db.clone();
 
-    if let Some(cli_files) = cli.files {
-        for file in cli_files.iter() {
+    if let Some(cli_files) = &cli.files {
+        for (i, file) in cli_files.iter().enumerate() {
+            // the first positional argument may be the main duckdb database
+            if i == 0 && db.is_none() && main_duckdb_candidate(file) {
+                db = Some(file.clone());
+                continue;
+            }
             if file.ends_with(".sqlnow") {
                 sidecar_files.push(file.clone());
                 continue;
@@ -264,101 +326,166 @@ async fn main() -> Result<()> {
         }
     }
 
-    // a "<dbfile>.sqlnow" sidecar next to the --db database is read automatically
-    if let Some(db) = &cli.db {
-        let sidecar = sidecar_path(db);
-        if sidecar.exists() {
-            sidecar_files.push(sidecar.to_string_lossy().to_string());
-        }
-    }
-
-    let mut replayed_id = None;
-    let mut db_sidecar_id = None;
-
-    for file in sidecar_files.iter() {
-        let (id, entries) = read_sidecar(std::path::Path::new(file))?;
-        let is_db_sidecar =
-            cli.db.as_ref().map(|db| sidecar_path(db).to_string_lossy() == *file.as_str()).unwrap_or(false);
-        if is_db_sidecar {
-            db_sidecar_id = id;
-        } else if replayed_id.is_none() {
-            replayed_id = id;
-        }
-        for (kind, input) in entries {
-            // inputs given on the command line win over sidecar entries
-            if views.iter().chain(tables.iter()).any(|i| i.name == input.name) {
-                continue;
-            }
-            if kind == "table" {
-                tables.push(input);
-            } else {
-                views.push(input);
-            }
-        }
-    }
-
-    // with --db, file views and tables are persisted inside the duckdb file
-    // itself; database attaches are the only thing lost between runs, so they
-    // are saved to the sidecar automatically. The sidecar also holds a random
-    // id so browser state (query history) can be scoped to this database.
-    let auto_sidecar: Option<(std::path::PathBuf, String, Vec<(String, Input)>)> = cli.db.as_ref().map(|db| {
-        let entries = views
-            .iter()
-            .filter(|i| i.is_database())
-            .map(|i| ("view".to_string(), (*i).clone()))
-            .collect();
-        let id = db_sidecar_id.clone().unwrap_or_else(random_id);
-        (sidecar_path(db), id, entries)
-    });
-
-    // --save <name>: record every input, so `sqlnow <name>.sqlnow` replays this command line
-    let save_sidecar: Option<(std::path::PathBuf, String, Vec<(String, Input)>)> = cli.save.as_ref().map(|name| {
-        let path = if name.ends_with(".sqlnow") {
-            name.clone()
+    // --- session anchoring ---
+    // The session (queries, history) lives in exactly one sidecar database:
+    // the main db's auto sidecar, else the --save file, else the first
+    // .sqlnow given on the command line, else in memory only.
+    let anchor_path: Option<PathBuf> = if let Some(db) = &db {
+        Some(sidecar_path(db))
+    } else if let Some(save) = &cli.save {
+        let name = if save.ends_with(".sqlnow") {
+            save.clone()
         } else {
-            format!("{}.sqlnow", name)
+            format!("{}.sqlnow", save)
         };
-        let path = std::path::PathBuf::from(path);
-        // keep the id stable when re-saving over an existing session file
-        let id = match path.exists() {
-            true => read_sidecar(&path).ok().and_then(|(id, _)| id),
-            false => None,
+        Some(PathBuf::from(name))
+    } else {
+        sidecar_files.first().map(PathBuf::from)
+    };
+
+    let session = match &anchor_path {
+        Some(path) => Session::open(path)?,
+        None => Session::in_memory()?,
+    };
+
+    // inputs recorded in the anchor session from previous runs
+    let mut stored_entries: Vec<(String, Input)> = session.list_inputs()?;
+
+    // any further .sqlnow files contribute their inputs and queries, which
+    // are merged into (and persisted in) the anchor
+    for file in sidecar_files.iter() {
+        let path = PathBuf::from(file);
+        if Some(&path) == anchor_path.as_ref() {
+            continue;
         }
-        .unwrap_or_else(random_id);
-        let mut entries: Vec<_> = views.iter().map(|i| ("view".to_string(), i.clone())).collect();
-        entries.extend(tables.iter().map(|i| ("table".to_string(), i.clone())));
-        (path, id, entries)
-    });
+        let other = Session::open(&path)?;
+        stored_entries.extend(other.list_inputs()?);
+        for query in other.list_queries()? {
+            if session.get_query(&query.name).is_err() {
+                session.upsert_query(&query.name, &query.sql)?;
+            }
+        }
+    }
 
-    // the id scopes browser-side state: --db wins, then --save, then a replayed
-    // session file; plain in-memory runs share the unscoped state as before
-    let scope = auto_sidecar
-        .as_ref()
-        .map(|(_, id, _)| id.clone())
-        .or_else(|| save_sidecar.as_ref().map(|(_, id, _)| id.clone()))
-        .or(replayed_id);
+    // inputs given on the command line win over stored entries
+    for (kind, mut input) in stored_entries {
+        if views.iter().chain(tables.iter()).any(|i| i.name == input.name) {
+            continue;
+        }
+        if let Err(e) = default_name_and_check(&mut input) {
+            eprintln!("Skipping stored input {}: {}", input.name, e);
+            continue;
+        }
+        if kind == "table" {
+            tables.push(input);
+        } else {
+            views.push(input);
+        }
+    }
 
+    // pre-defined queries from the command line (they overwrite same-named
+    // queries already in the session)
+    for spec in cli.query.iter() {
+        match parse_query_spec(spec) {
+            (Some(name), sql) => session.upsert_query(&name, &sql)?,
+            (None, sql) => {
+                session.create_query(None, &sql)?;
+            }
+        }
+    }
+    for spec in cli.query_file.iter() {
+        let (name, sql) = parse_query_file_spec(spec)?;
+        session.upsert_query(&name, &sql)?;
+    }
+
+    // --open <name> overrides the session's stored open query
+    if let Some(Some(name)) = &cli.open {
+        if session.get_query(name).is_ok() {
+            session.set_open(Some(name))?;
+        } else {
+            eprintln!("warning: --open query \"{}\" does not exist, ignoring", name);
+        }
+    }
+    let open_query = match session.open_query()? {
+        Some(name) if session.get_query(&name).is_ok() => Some(name),
+        Some(name) => {
+            eprintln!("warning: open query \"{}\" does not exist, ignoring", name);
+            None
+        }
+        None => None,
+    };
+
+    // browser state (query history, prefs) is scoped to persisted sessions
+    let scope = anchor_path.as_ref().map(|_| session.id().to_string());
 
     let config = Config {
-        database: cli.db,
-        views,
+        database: db.clone(),
+        views: views.clone(),
         drop: cli.drop,
         all_text: cli.text,
-        tables,
+        tables: tables.clone(),
         scope,
     };
 
-    let app_data = tokio::task::spawn_blocking(||
-        get_app_data(config)
-    ).await??;
+    let session = Arc::new(Mutex::new(session));
 
-    // only save sidecars once everything attached successfully
-    if let Some((path, id, entries)) = auto_sidecar {
-        write_sidecar(&path, &id, &entries)?;
+    let app_data = {
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || get_app_data(config, session)).await??
+    };
+
+    // record inputs only once everything attached successfully. With a main
+    // db, file views/tables are persisted inside the duckdb file itself, so
+    // only database attaches need recording; otherwise everything does.
+    if anchor_path.is_some() {
+        let entries: Vec<(String, Input)> = if db.is_some() {
+            views
+                .iter()
+                .filter(|i| i.is_database())
+                .map(|i| ("view".to_string(), (*i).clone()))
+                .collect()
+        } else {
+            views
+                .iter()
+                .map(|i| ("view".to_string(), i.clone()))
+                .chain(tables.iter().map(|i| ("table".to_string(), i.clone())))
+                .collect()
+        };
+        session
+            .lock()
+            .expect("session lock")
+            .set_inputs(&entries)?;
     }
-    if let Some((path, id, entries)) = save_sidecar {
-        write_sidecar(&path, &id, &entries)?;
-        println!("Saved inputs to {}, replay with: sqlnow {}", path.display(), path.display());
+
+    // --save alongside a main db: the db sidecar anchors the session, but a
+    // replayable inputs file is still written
+    if db.is_some() {
+        if let Some(save) = &cli.save {
+            let name = if save.ends_with(".sqlnow") {
+                save.clone()
+            } else {
+                format!("{}.sqlnow", save)
+            };
+            let save_session = Session::open(std::path::Path::new(&name))?;
+            let entries: Vec<(String, Input)> = views
+                .iter()
+                .map(|i| ("view".to_string(), i.clone()))
+                .chain(tables.iter().map(|i| ("table".to_string(), i.clone())))
+                .collect();
+            save_session.set_inputs(&entries)?;
+            println!("Saved inputs to {}, replay with: sqlnow {}", name, name);
+        }
+    } else if cli.save.is_some() {
+        let path = anchor_path.as_ref().expect("save anchors the session");
+        println!(
+            "Saved session to {}, replay with: sqlnow {}",
+            path.display(),
+            path.display()
+        );
+    }
+
+    if anchor_path.is_none() {
+        println!("note: session not persisted — use --save <name> to keep queries and history");
     }
 
     let host = match env::var("HOST") {
@@ -383,11 +510,25 @@ async fn main() -> Result<()> {
                 Err(_) => 1
             }
         }
-        Err(_) => 1 
+        Err(_) => 1
     };
 
-    //open::that(format!("http://{}:{}", host, port))?;
-    println!("Server running on http://{}:{}", host, port);
+    let base_url = format!("http://{}:{}", host, port);
+    println!("Server running on {}", base_url);
+
+    let deep_url = open_query
+        .as_ref()
+        .map(|name| format!("{}/queries/{}", base_url, percent_encode(name)));
+    if let (Some(name), Some(url)) = (&open_query, &deep_url) {
+        println!("Open query \"{}\": {}", name, url);
+    }
+
+    if cli.open.is_some() {
+        let target = deep_url.clone().unwrap_or_else(|| base_url.clone());
+        if let Err(e) = open::that(&target) {
+            eprintln!("Could not open the browser: {}", e);
+        }
+    }
 
     HttpServer::new(move || {
       App::new()
