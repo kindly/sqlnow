@@ -7,3 +7,19 @@
 bacon.toml
 .vscode
 /node_modules
+.claude/
+/*.db
+/sqlnow-data*/
+/ui/dist/
+
+# sandbox/session placeholder files and local tooling
+/.bash_profile
+/.bashrc
+/.gitconfig
+/.gitmodules
+/.profile
+/.ripgreprc
+/.zprofile
+/.zshrc
+/.idea
+.mcp.json
