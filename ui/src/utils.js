@@ -1,7 +1,15 @@
 import xxhash from 'xxhash-wasm';
 
+// The server injects window.SQLNOW_SCOPE (the session sidecar id) into
+// index.html, so stored state is keyed per session. Without one (plain
+// in-memory runs, vite dev server) keys are unscoped, as before.
+export function storageKey(suffix) {
+  const scope = window.SQLNOW_SCOPE;
+  return scope ? `sqlnow-${scope}-${suffix}` : `sqlnow-${suffix}`;
+}
+
 export function addToHistory(sql) {
-  let history = localStorage.getItem('sqlnow-history-list') || '';
+  let history = localStorage.getItem(storageKey('history-list')) || '';
   let historyList = history.split(',');
   if (!history) {
     historyList = [];
@@ -9,14 +17,14 @@ export function addToHistory(sql) {
 
   xxhash().then(hasher => {
     let sqlhash = hasher.h64ToString(sql);
-    localStorage.setItem('sqlnow-history-' + sqlhash, sql);
+    localStorage.setItem(storageKey('history-' + sqlhash), sql);
 
     const index = historyList.indexOf(sqlhash);
-    if (index > -1) { 
-      historyList.splice(index, 1); 
+    if (index > -1) {
+      historyList.splice(index, 1);
     }
     historyList.unshift(sqlhash);
-    localStorage.setItem('sqlnow-history-list', historyList.join(','));
+    localStorage.setItem(storageKey('history-list'), historyList.join(','));
   });
 }
 

@@ -1,8 +1,9 @@
+import { storageKey } from "../utils";
 import { useNavigate } from "react-router-dom";
 import { useOutletContext } from "react-router-dom";
 
 export default function History() {
-  let history = localStorage.getItem("sqlnow-history-list") || "";
+  let history = localStorage.getItem(storageKey('history-list')) || "";
   let historyList = history.split(",").map((s) => s.trim());
   let navigate = useNavigate();
 
@@ -10,10 +11,10 @@ export default function History() {
 
   function onHistoryClick(sql) {
 
-    let id = parseInt(window.localStorage.getItem('sqlnow-queryLastId'));
+    let id = parseInt(window.localStorage.getItem(storageKey('queryLastId')));
     let new_id = id + 1;
 
-    window.localStorage.setItem('sqlnow-queryLastId', new_id.toString());
+    window.localStorage.setItem(storageKey('queryLastId'), new_id.toString());
 
     let newQueries = [...queries];
 
@@ -21,14 +22,14 @@ export default function History() {
 
     setQueries(newQueries);
 
-    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
-    window.localStorage.setItem('sqlnow-sql-query-' + new_id.toString(), sql);
+    window.localStorage.setItem(storageKey('queries'), JSON.stringify(newQueries));
+    window.localStorage.setItem(storageKey('sql-query-' + new_id.toString()), sql);
 
     navigate("/queries/" + new_id.toString() + "#new");
   }
 
   let historyHtml = historyList.map((hash) => {
-    let sql = localStorage.getItem('sqlnow-history-' + hash);
+    let sql = localStorage.getItem(storageKey('history-' + hash));
     return <tr key={hash}>
       <td><a className="btn btn-sm" onClick={() => onHistoryClick(sql)}>query</a></td>
       <td><pre>{sql}</pre></td>

@@ -24,7 +24,6 @@ use duckdb::types::{ListType, ValueRef};
 
 static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
-static INCLUDE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/include");
 
 #[derive(Debug, Clone, Copy)]
 pub enum DbType {
@@ -64,6 +63,8 @@ pub struct Config {
     pub tables: Vec<Input>,
     pub drop:bool,
     pub all_text:bool,
+    /// id used to scope browser-side state (query history) to this session
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,6 +116,7 @@ pub struct AppData {
     pub tabs: Vec<Tab>,
     pub sections: Vec<String>,
     pub env: Environment<'static>,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -429,6 +431,8 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
     section_list.sort();
     section_list.dedup();
 
+    let scope = config.scope.clone();
+
     Ok(AppData {
         config,
         connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
@@ -436,6 +440,7 @@ pub fn get_app_data(config: Config) -> Result<AppData> {
         tabs,
         sections: section_list,
         env,
+        scope,
     })
 }
 
@@ -531,39 +536,28 @@ async fn static_files(filename: web::Path<String>) -> Result<impl Responder, Err
     let data = STATIC_DIR.get_file("assets/".to_owned() + filename.as_str()).ok_or(ErrorBadRequest("file not found"))?;
     let contents = data.contents();
 
-    let content_type = if filename.as_str().ends_with(".css") {
-        "text/css"
-    } else if filename.as_str().ends_with(".js") {
-        "application/javascript"
-    } else if filename.as_str().ends_with(".wasm") {
-        "application/wasm"
-    } else {
-        "text/html"
-    };
+    let content_type = mime_guess::from_path(filename.as_str())
+        .first_or_octet_stream()
+        .to_string();
 
     return Ok(
         HttpResponse::Ok()
             .append_header(("Content-Type", content_type))
-            //.append_header(("Cache-Control", "max-age=31536000"))
+            // vite asset filenames are content-hashed, so they can be cached forever
+            .append_header(("Cache-Control", "public, max-age=31536000, immutable"))
             .body(contents)
     );
 }
 
-async fn ui() -> Result<impl Responder, Error> {
-
-    let data = if std::env::var("SQLNOW_DEV").is_ok() {
-        INCLUDE_DIR.get_file("index.html").ok_or(ErrorBadRequest("file not found"))?
-    } else {
-        STATIC_DIR.get_file("index.html").ok_or(ErrorBadRequest("file not found"))?
-    };
-
-    let res = data.contents_utf8().expect("utf8 file");
-    // lt tmpl = app_data
-    //     .env
-    //     .get_template("index.html")
-    //     .expect("template exists");
-    // let res = tmpl.render(&context! {}).map_err(|e| ErrorInternalServerError(e))?;
-
+async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
+    let data = STATIC_DIR.get_file("index.html").ok_or(ErrorBadRequest("file not found"))?;
+    let mut res = data.contents_utf8().expect("utf8 file").to_string();
+    // make the session scope available to the UI before any of its code runs,
+    // so browser-stored state (query history) can be keyed per session
+    if let Some(scope) = &app_data.scope {
+        let script = format!("<script>window.SQLNOW_SCOPE = {};</script></head>", json!(scope));
+        res = res.replace("</head>", &script);
+    }
     Ok(HttpResponse::Ok().body(res))
 }
 

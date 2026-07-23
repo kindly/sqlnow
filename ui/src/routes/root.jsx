@@ -1,3 +1,4 @@
+import { storageKey } from "../utils";
 import { NavLink, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
@@ -16,7 +17,7 @@ export default function Root() {
 
   let [ tables, setTables ] = useState(null);
 
-  let [ queries, setQueries ] = useState(JSON.parse(localStorage.getItem('sqlnow-queries')));
+  let [ queries, setQueries ] = useState(JSON.parse(localStorage.getItem(storageKey('queries'))));
 
   let navigate = useNavigate();
   let loc = useLocation();
@@ -30,11 +31,11 @@ export default function Root() {
 
   function newQuery() {
     let newQueries = [...queries];
-    let newId = parseInt(localStorage.getItem('sqlnow-queryLastId')) + 1;
-    localStorage.setItem('sqlnow-queryLastId', newId.toString());
+    let newId = parseInt(localStorage.getItem(storageKey('queryLastId'))) + 1;
+    localStorage.setItem(storageKey('queryLastId'), newId.toString());
     newQueries.push({"id": newId, "name": "query " + newId});
     setQueries(newQueries);
-    localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    localStorage.setItem(storageKey('queries'), JSON.stringify(newQueries));
 
     navigate("/queries/" + newId + "#new");
     // let querySection = document.getElementById("query-section");

@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useState } from 'react';
 import PropTypes from 'prop-types';
 import { useOutletContext } from "react-router-dom";
-import { addToHistory } from './utils';
+import { addToHistory, storageKey } from './utils';
 import { DataEditor, GridCellKind } from '@glideapps/glide-data-grid';
 import "@glideapps/glide-data-grid/dist/index.css";
 import { vim } from "@replit/codemirror-vim"
@@ -53,7 +53,7 @@ export default function QueryForm(props) {
     query = newQueries.find((query) => query.id == queryName);
   }
 
-  let initialSql = window.localStorage.getItem(`sqlnow-sql-${queryType}-${queryName}`);
+  let initialSql = window.localStorage.getItem(storageKey(`sql-${queryType}-${queryName}`));
   if (!initialSql && schema && queryType == "table") {
     initialSql = generateSql(schema, "select_fields");
   }
@@ -71,7 +71,7 @@ export default function QueryForm(props) {
     addToHistory(sql);
     setSql(generateSql(schema, sqlType));
 
-    window.localStorage.setItem(`sqlnow-sql-${queryType}-${queryName}`, generateSql(schema, sqlType))
+    window.localStorage.setItem(storageKey(`sql-${queryType}-${queryName}`), generateSql(schema, sqlType))
   }
 
   const onColumnResize = useCallback((column, newSize, colIndex) => {
@@ -103,7 +103,7 @@ export default function QueryForm(props) {
   }
 
   function onSqlChange(value) {
-    window.localStorage.setItem(`sqlnow-sql-${queryType}-${queryName}`, value)
+    window.localStorage.setItem(storageKey(`sql-${queryType}-${queryName}`), value)
     setSql(value);
   }
 
@@ -134,13 +134,13 @@ export default function QueryForm(props) {
     let newQueries = [...queries];
     let query = newQueries.find((query) => query.id == queryName);
     query.name = e.target.value;
-    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    window.localStorage.setItem(storageKey('queries'), JSON.stringify(newQueries));
     setQueries(newQueries);
   }
 
   function deleteQuery() {
     let newQueries = queries.filter((query) => query.id != queryName);
-    window.localStorage.setItem('sqlnow-queries', JSON.stringify(newQueries));
+    window.localStorage.setItem(storageKey('queries'), JSON.stringify(newQueries));
     setQueries(newQueries);
     addToHistory(sql)
     navigate("/queries/" + newQueries[0].id);

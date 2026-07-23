@@ -12,13 +12,14 @@ import Table from "./routes/table";
 import Root from './routes/root';
 import History from './routes/history';
 
-let queries = window.localStorage.getItem('sqlnow-queries');
-// let queryIndex = window.localStorage.getItem('sqlnow-queryIndex');
+import { storageKey } from './utils';
+
+let queries = window.localStorage.getItem(storageKey('queries'));
 
 if (!queries) {
-  window.localStorage.setItem('sqlnow-queryLastId', '1');
+  window.localStorage.setItem(storageKey('queryLastId'), '1');
   queries = [{"id": 1, "name": "query 1"}];
-  window.localStorage.setItem('sqlnow-queries', JSON.stringify(queries));
+  window.localStorage.setItem(storageKey('queries'), JSON.stringify(queries));
 }
 
 const router = createBrowserRouter([
