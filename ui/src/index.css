@@ -1,8 +1,100 @@
-@import 'tailwindcss/base';
-@import 'tailwindcss/components';
-@import 'tailwindcss/utilities';
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * sqlnow token system — "instrument panel".
+ * Graphite surfaces, one blue accent, IBM Plex. Raw values live on
+ * :root/.dark and flip with the theme; @theme inline exposes them as
+ * Tailwind utilities (bg-surface, text-muted, border-edge, ...).
+ */
+
+:root {
+  --sn-bg: #f3f4f6;
+  --sn-surface: #ffffff;
+  --sn-raised: #ebedf1;
+  --sn-edge: #dbdee4;
+  --sn-edge-strong: #b9bfc9;
+  --sn-ink: #1b1e24;
+  --sn-muted: #5b6371;
+  --sn-dim: #7c8492;
+  --sn-accent: #2257cc;
+  --sn-accent-ink: #ffffff;
+  --sn-danger: #b01f37;
+  --sn-ok: #1e7b48;
+}
+
+.dark {
+  --sn-bg: #14161b;
+  --sn-surface: #1a1d24;
+  --sn-raised: #232834;
+  --sn-edge: #2b303b;
+  --sn-edge-strong: #3b4250;
+  --sn-ink: #e9ebef;
+  --sn-muted: #9ba3b0;
+  --sn-dim: #78818f;
+  --sn-accent: #79a7f5;
+  --sn-accent-ink: #0e1116;
+  --sn-danger: #f0808b;
+  --sn-ok: #7fcb9b;
+}
+
+@theme inline {
+  --color-bg: var(--sn-bg);
+  --color-surface: var(--sn-surface);
+  --color-raised: var(--sn-raised);
+  --color-edge: var(--sn-edge);
+  --color-edge-strong: var(--sn-edge-strong);
+  --color-ink: var(--sn-ink);
+  --color-muted: var(--sn-muted);
+  --color-dim: var(--sn-dim);
+  --color-accent: var(--sn-accent);
+  --color-accent-ink: var(--sn-accent-ink);
+  --color-danger: var(--sn-danger);
+  --color-ok: var(--sn-ok);
+
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Cascadia Mono', monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--sn-bg);
+  color: var(--sn-ink);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--sn-accent) 30%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--sn-accent);
+  outline-offset: 1px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sn-edge-strong) transparent;
+}
+
+/* The data grid's scroll container gets a full-size scrollbar with a
+   visible track, so scroll position is always readable against the data. */
+.dvn-scroller {
+  scrollbar-width: auto;
+  scrollbar-color: var(--sn-edge-strong) var(--sn-raised);
+}
 
 .cm-editor {
-    resize: vertical;
-    overflow: auto !important;
+  resize: vertical;
+  overflow: auto !important;
+  font-size: 13px;
+}
+
+.cm-editor.cm-focused {
+  outline: none;
 }

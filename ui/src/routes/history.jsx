@@ -1,61 +1,60 @@
-import { storageKey } from "../utils";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useOutletContext } from "react-router-dom";
+import { createQuery, fetchHistory, queryPath } from "../utils";
 
 export default function History() {
-  let history = localStorage.getItem(storageKey('history-list')) || "";
-  let historyList = history.split(",").map((s) => s.trim());
-  let navigate = useNavigate();
+  const [entries, setEntries] = useState(null);
+  const navigate = useNavigate();
 
-  let {queries, setQueries} = useOutletContext();
+  useEffect(() => {
+    fetchHistory(200)
+      .then((data) => setEntries(data.history))
+      .catch((e) => {
+        console.error("Failed to load history:", e);
+        setEntries([]);
+      });
+  }, []);
 
-  function onHistoryClick(sql) {
-
-    let id = parseInt(window.localStorage.getItem(storageKey('queryLastId')));
-    let new_id = id + 1;
-
-    window.localStorage.setItem(storageKey('queryLastId'), new_id.toString());
-
-    let newQueries = [...queries];
-
-    newQueries.push({"id": new_id, "name": "query " + new_id});
-
-    setQueries(newQueries);
-
-    window.localStorage.setItem(storageKey('queries'), JSON.stringify(newQueries));
-    window.localStorage.setItem(storageKey('sql-query-' + new_id.toString()), sql);
-
-    navigate("/queries/" + new_id.toString() + "#new");
+  async function onHistoryClick(sql) {
+    try {
+      const created = await createQuery({ sql });
+      navigate(queryPath(created.name) + "#new");
+    } catch (e) {
+      console.error("Failed to create query from history:", e);
+    }
   }
 
-  let historyHtml = historyList.map((hash) => {
-    let sql = localStorage.getItem(storageKey('history-' + hash));
-    return <tr key={hash}>
-      <td><a className="btn btn-sm" onClick={() => onHistoryClick(sql)}>query</a></td>
-      <td><pre>{sql}</pre></td>
-    </tr>
-  });
-
   return (
-    <main id="tab_content" role="main" className="w-full sm:w-1/2 md:w-2/3 xl:w-3/4 pt-1 px-2">
-      <div className="flex justify-between mb-4">
-        <div>
-          <div className="overflow-x-auto">
-          <table className="table">
-              <thead>
-                  <tr>
-                      <th></th>
-                      <th>SQL</th>
-                      <th></th>
-                  </tr>
-              </thead>
-              <tbody>
-                {historyHtml}
-              </tbody>
-          </table>
+    <main role="main" className="flex min-w-0 flex-1 flex-col bg-bg">
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-edge bg-surface px-4">
+        <h1 className="text-[13px] font-medium">History</h1>
+        {entries &&
+          <span className="font-mono text-[11px] text-dim">
+            {entries.length === 200
+              ? "last 200 queries"
+              : `${entries.length.toLocaleString()} ${entries.length === 1 ? "query" : "queries"}`}
+          </span>
+        }
+      </header>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {entries && entries.length === 0 &&
+          <div className="flex h-full items-center justify-center">
+            <p className="font-mono text-xs text-dim">Queries you run appear here</p>
           </div>
-          
-        </div>
+        }
+        {entries && entries.map((entry, i) => (
+          <div key={i} className="flex items-start gap-4 border-b border-edge px-4 py-3">
+            <pre className="min-w-0 flex-1 overflow-x-auto font-mono text-xs leading-5 text-muted">{entry.sql}</pre>
+            <span className="shrink-0 font-mono text-[11px] text-dim">{entry.at}</span>
+            <button
+              className="shrink-0 rounded border border-edge px-2.5 py-1 font-mono text-[11px] text-muted hover:border-edge-strong hover:text-ink"
+              onClick={() => onHistoryClick(entry.sql)}
+            >
+              Open as query
+            </button>
+          </div>
+        ))}
       </div>
     </main>
   );

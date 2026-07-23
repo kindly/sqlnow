@@ -1,53 +1,53 @@
-import xxhash from 'xxhash-wasm';
-
-// The server injects window.SQLNOW_SCOPE (the session sidecar id) into
-// index.html, so stored state is keyed per session. Without one (plain
+// The server injects window.SQLNOW_SCOPE (the session id) into index.html,
+// so browser-stored preferences are keyed per session. Without one (plain
 // in-memory runs, vite dev server) keys are unscoped, as before.
 export function storageKey(suffix) {
   const scope = window.SQLNOW_SCOPE;
   return scope ? `sqlnow-${scope}-${suffix}` : `sqlnow-${suffix}`;
 }
 
-export function addToHistory(sql) {
-  let history = localStorage.getItem(storageKey('history-list')) || '';
-  let historyList = history.split(',');
-  if (!history) {
-    historyList = [];
+async function apiJson(url, options = {}) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options,
+  });
+  if (res.status === 204) {
+    return null;
   }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
 
-  xxhash().then(hasher => {
-    let sqlhash = hasher.h64ToString(sql);
-    localStorage.setItem(storageKey('history-' + sqlhash), sql);
+export function fetchQueries() {
+  return apiJson('/api/queries');
+}
 
-    const index = historyList.indexOf(sqlhash);
-    if (index > -1) {
-      historyList.splice(index, 1);
-    }
-    historyList.unshift(sqlhash);
-    localStorage.setItem(storageKey('history-list'), historyList.join(','));
+export function fetchQuery(name) {
+  return apiJson('/api/queries/' + encodeURIComponent(name));
+}
+
+export function createQuery(body = {}) {
+  return apiJson('/api/queries', { method: 'POST', body: JSON.stringify(body) });
+}
+
+export function updateQuery(name, body) {
+  return apiJson('/api/queries/' + encodeURIComponent(name), {
+    method: 'PUT',
+    body: JSON.stringify(body),
   });
 }
 
+export function deleteQueryApi(name) {
+  return apiJson('/api/queries/' + encodeURIComponent(name), { method: 'DELETE' });
+}
 
+export function fetchHistory(limit = 200) {
+  return apiJson('/api/history?limit=' + limit);
+}
 
-            //     {/* <div className="mt-2">
-            //       <table className="table table-xs table-pin-rows mt-2">
-            //         <thead>
-            //           <tr>
-            //             {results.headers.map((header, i) => (
-            //                 <td key={i}><pre>{header}</pre></td>
-            //             ))}
-            //           </tr>
-            //         </thead>
-            //         <tbody>
-            //           {results.rows.map((row, i) => (
-            //             <tr key={i}>
-            //               {row.map((cell, j) => (
-            //                 <td key={j}><pre>{cell}</pre></td>
-            //               ))}
-            //             </tr>
-            //           ))}
-            //         </tbody>
-            //       </table>
-            //     </div>
-            //   </div> */}
+export function queryPath(name) {
+  return '/queries/' + encodeURIComponent(name);
+}
