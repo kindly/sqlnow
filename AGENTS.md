@@ -49,7 +49,8 @@ a server that will keep running for the user. Never use it for test or
 verification launches, and never when your processes die with your shell
 (prepare the session and report the launch command instead — include `--open`
 in the command you hand over, not in the ones you run). Otherwise omit it and
-relay the printed URL. Set `PORT`/`HOST` env vars to control binding.
+relay the printed URL. `--port`/`--host` (or the `PORT`/`HOST` env vars)
+control binding.
 
 Practical notes that save time:
 

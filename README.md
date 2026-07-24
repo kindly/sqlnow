@@ -101,7 +101,8 @@ localStorage by older versions are not migrated.
 
 ## Server
 
-Environment variables: `HOST` (default `127.0.0.1`), `PORT` (default `8080`),
-`WORKERS` (default 1). The UI talks to a JSON API (`/api/queries`,
+`--port` and `--host` control binding (defaults `8080` on `127.0.0.1`), with
+`PORT`/`HOST` env vars as fallbacks; `WORKERS` env sets worker count
+(default 1). The UI talks to a JSON API (`/api/queries`,
 `/api/history`) documented in [AGENTS.md](AGENTS.md); exports stream from
 `POST /outputs` as CSV/TSV/JSONL.

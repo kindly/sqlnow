@@ -63,6 +63,14 @@ struct Cli {
     #[arg(long, num_args = 0..=1)]
     open: Option<Option<String>>,
 
+    /// Port to serve on (also: PORT env var) [default: 8080]
+    #[arg(short, long)]
+    port: Option<u16>,
+
+    /// Address to bind (also: HOST env var) [default: 127.0.0.1]
+    #[arg(long)]
+    host: Option<String>,
+
     files: Option<Vec<String>>,
 }
 
@@ -505,20 +513,14 @@ async fn main() -> Result<()> {
         println!("note: session not persisted — use --save <name> to keep queries and history");
     }
 
-    let host = match env::var("HOST") {
-        Ok(val) => val,
-        Err(_) => "127.0.0.1".into(),
-    };
+    // precedence: flag, then env var, then default
+    let host = cli.host.clone()
+        .or_else(|| env::var("HOST").ok())
+        .unwrap_or_else(|| "127.0.0.1".into());
 
-    let port: u16 = match env::var("PORT") {
-        Ok(val) => {
-            match val.parse::<u16>() {
-                Ok(val) => val,
-                Err(_) => 8080
-            }
-        }
-        Err(_) => 8080
-    };
+    let port: u16 = cli.port
+        .or_else(|| env::var("PORT").ok().and_then(|val| val.parse().ok()))
+        .unwrap_or(8080);
 
     let workers: usize = match env::var("WORKERS") {
         Ok(val) => {
