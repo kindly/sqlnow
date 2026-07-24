@@ -4277,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "sqlnow"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "actix-web",
  "clap",
