@@ -530,7 +530,7 @@ pub fn parse_legacy_sidecar(path: &Path) -> Result<(Option<String>, Vec<(String,
             return Err(eyre::eyre!("Invalid line in {}: {}", path.display(), line));
         }
 
-        let mut input = input_into_parts(spec.trim());
+        let mut input = input_into_parts(spec.trim())?;
 
         // hand-edited sidecars may use paths relative to the sidecar's directory
         if let Some(local) = local_db_path(&input.uri).or_else(|| {
@@ -560,52 +560,71 @@ pub fn parse_legacy_sidecar(path: &Path) -> Result<(Option<String>, Vec<(String,
 
 // --- input parsing helpers (shared by the CLI and sidecar code) ---
 
-/// Parse an input spec: `name=uri#table1,table2`, each part optional except uri.
-pub fn input_into_parts(input: &str) -> Input {
-    let mut name = "".to_owned();
-    let uri: String;
-    let mut hash = Vec::new();
+/// Quote a SQL identifier (double quotes, embedded quotes doubled).
+pub fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
 
-    let not_name: String;
+/// Quote a SQL string literal (single quotes, embedded quotes doubled).
+pub fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
 
-    match input.split_once('=') {
-        Some((start, end)) => {
-            name = start.to_owned();
-            not_name = end.to_owned();
-        }
-        None => {
-            not_name = input.to_owned();
-        }
-    }
+/// Could this be an input name given on the left of `=`? Rules out anything
+/// path- or URI-shaped, so `postgresql://host/db?sslmode=disable` or
+/// `C:\data.csv` can never be split. (The fully general way to name an input
+/// is the `--as` flag, which does no splitting at all.)
+fn plausible_input_name(candidate: &str) -> bool {
+    validate_name(candidate).is_ok() && !candidate.contains(':') && !candidate.contains('\\')
+}
 
-    match not_name.rsplit_once('#') {
-        Some((start, end)) => {
-            uri = start.to_owned();
-
-            if !end.is_empty() {
-                let mut reader = csv::ReaderBuilder::new()
-                    .has_headers(false)
-                    .from_reader(end.as_bytes());
-
-                for record in reader.records() {
-                    let record = record.unwrap();
-                    for field in record.iter() {
-                        hash.push(field.to_owned());
-                    }
-                    break;
-                }
-            }
-        }
-        None => {
-            uri = not_name.to_owned();
+/// Split a table-filter list (csv rules, so quoted names may contain commas).
+pub fn parse_table_filter(list: &str) -> Vec<String> {
+    let mut tables = Vec::new();
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(list.as_bytes());
+    if let Some(Ok(record)) = reader.records().next() {
+        for field in record.iter() {
+            tables.push(field.to_owned());
         }
     }
+    tables
+}
 
-    Input {
-        name,
-        uri,
-        tables: hash,
+/// Parse an input spec: `name=uri#table1,table2`, each part optional except
+/// uri. `=` only splits a name off when the left side is plausibly a name,
+/// and neither `=` nor `#` split when the spec (or the part after the name)
+/// is an existing file — so real paths containing either character work.
+pub fn input_into_parts(input: &str) -> Result<Input> {
+    // a spec that names an existing file is always just a path
+    if std::path::Path::new(input).exists() {
+        return Ok(Input {
+            name: "".to_owned(),
+            uri: input.to_owned(),
+            tables: vec![],
+        });
     }
+
+    let (name, not_name) = match input.split_once('=') {
+        Some((start, end)) if plausible_input_name(start) => (start.to_owned(), end.to_owned()),
+        _ => ("".to_owned(), input.to_owned()),
+    };
+
+    if std::path::Path::new(&not_name).exists() {
+        return Ok(Input {
+            name,
+            uri: not_name,
+            tables: vec![],
+        });
+    }
+
+    let (uri, tables) = match not_name.rsplit_once('#') {
+        Some((start, end)) => (start.to_owned(), parse_table_filter(end)),
+        None => (not_name, vec![]),
+    };
+
+    Ok(Input { name, uri, tables })
 }
 
 pub fn default_name_and_check(input: &mut Input) -> Result<()> {

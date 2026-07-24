@@ -30,10 +30,25 @@ sqlnow data.parquet --save analysis -q "peek=SELECT * FROM data LIMIT 100"
 sqlnow analysis.sqlnow
 ```
 
-Inputs are `name=uri`, positional or via `-v` (view) / `-t` (table): parquet,
-csv, xlsx, json/jsonl, sqlite files, duckdb files, `postgresql://...` URIs,
-s3/http URLs. A DuckDB file as the **first** positional argument becomes the
-main database (tables created there persist in it).
+Inputs are positional or via `-v` (view) / `-t` (table): parquet, csv, xlsx,
+json/jsonl, sqlite files, duckdb files, `postgresql://...` URIs, s3/http
+URLs. A DuckDB file as the **first** positional argument becomes the main
+database (tables created there persist in it).
+
+**Naming things — `--as` is the always-safe form.** It names the input or
+query immediately before it, and makes that value completely literal (no
+splitting of any kind), so any URI, path, SQL, or name works:
+
+```bash
+sqlnow -v 'postgresql://localhost/db?sslmode=disable' --as gem \
+       -v app.sqlite --as "legacy db" --tables orders,customers \
+       -q 'SELECT * FROM t WHERE a=1' --as 'top rows'
+```
+
+The `name=target` / `name=SQL` shorthand also exists for simple cases
+(`-v gem=postgresql://...`, `-q "top=SELECT 1"`). It is guarded — it never
+splits existing file paths, URIs, or SQL that starts with a SQL keyword —
+but when a value could be ambiguous, prefer `--as`.
 
 **Relay the URL**: the server prints these lines on startup — pass the deep
 link to the user.
@@ -194,7 +209,15 @@ sqlnow session.sqlnow plants.parquet
 ```
 
 Results print as CSV with a header row. Multi-statement input is allowed
-(no rows returned). This also works while a server is running — the server
+(no rows returned). When the SQL you are inserting itself contains quotes,
+duckdb's dollar-quoting avoids all escaping:
+
+```bash
+sqlnow exec session.sqlnow "INSERT INTO queries(pos, name, sql) VALUES
+  (1, 'names', \$q\$SELECT name FROM t WHERE note = 'it''s fine'\$q\$)"
+```
+
+This also works while a server is running — the server
 holds no file handle between requests — but concurrent access can
 occasionally hit a lock; the HTTP API never does, so prefer it for live
 changes.

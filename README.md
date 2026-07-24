@@ -27,7 +27,16 @@ cargo build --release                            # target/release/sqlnow
 
 ## Inputs
 
-Each input is `name=uri#table1,table2` — name and table filter optional.
+Name an input or query with `--as` (applies to the value immediately before
+it, taken literally — safe for URIs, paths, and SQL containing any
+characters); filter database tables with `--tables t1,t2`:
+
+```
+sqlnow -v postgresql://host/db --as pg -q 'SELECT count(*) FROM pg.public.t' --as counts
+```
+
+For simple names there is also the shorthand `name=uri#table1,table2`
+(guarded: existing paths, URIs, and keyword-leading SQL are never split).
 
 | Kind | Example |
 |---|---|

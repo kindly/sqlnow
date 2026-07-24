@@ -5,7 +5,8 @@ mod session;
 
 pub use session::{
     absolute_uri, default_name_and_check, input_into_parts, local_db_path, parse_legacy_sidecar,
-    random_id, sidecar_path, validate_name, HistoryEntry, Session, SessionError, StoredQuery,
+    parse_table_filter, quote_ident, quote_literal, random_id, sidecar_path, validate_name,
+    HistoryEntry, Session, SessionError, StoredQuery,
 };
 
 use duckdb::arrow::array::Array;
@@ -255,19 +256,25 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
             if input.uri.ends_with(".csv") {
                 connection
                     .execute_batch(&format!(
-                        "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true{all_varchar});",
-                        input.name, input.uri
+                        "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_csv({}, header = true{all_varchar});",
+                        quote_ident(&input.name), quote_literal(&input.uri)
                     ))?;
             } else if input.uri.ends_with(".parquet") {
                 connection
                     .execute_batch(&format!(
-                        "CREATE VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
-                        input.name, input.uri
+                        "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_parquet({});",
+                        quote_ident(&input.name), quote_literal(&input.uri)
                     ))?;
             } else if input.uri.ends_with(".xlsx") {
                 return Err(eyre::eyre!("XLSX not supported for views"));
-            } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {   
+            } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
                 return Err(eyre::eyre!("json not supported for views"));
+            } else {
+                return Err(eyre::eyre!(
+                    "Don't know how to load \"{}\" — expected a database (a .duckdb/.sqlite/.db file, \
+                     sqlite:// or postgresql:// URI) or a .parquet/.csv/.xlsx/.json/.jsonl file",
+                    input.uri
+                ));
             }
         }
     }
@@ -280,19 +287,24 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         if input.uri.ends_with(".csv") {
             connection
                 .execute_batch(&format!(
-                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true{all_varchar});",
-                    input.name, input.uri
+                    "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM read_csv({}, header = true{all_varchar});",
+                    quote_ident(&input.name), quote_literal(&input.uri)
                 ))?
         } else if input.uri.ends_with(".parquet") {
             connection
                 .execute_batch(&format!(
-                    "CREATE TABLE IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
-                    input.name, input.uri
+                    "CREATE TABLE IF NOT EXISTS {} AS SELECT * FROM read_parquet({});",
+                    quote_ident(&input.name), quote_literal(&input.uri)
                 ))?
         } else if input.uri.ends_with(".xlsx") {
             load_xlsx(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
         } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
             load_json(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
+        } else {
+            return Err(eyre::eyre!(
+                "Don't know how to load \"{}\" as a table — expected a .parquet/.csv/.xlsx/.json/.jsonl file",
+                input.uri
+            ));
         }
     }
 
@@ -485,10 +497,12 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
 /// `input.is_database()`).
 fn attach_statement(input: &Input) -> String {
     let connection_string = input.uri.strip_prefix("sqlite://").unwrap_or(&input.uri);
+    let uri = quote_literal(connection_string);
+    let name = quote_ident(&input.name);
     match input.db_type() {
-        DbType::Postgres => format!("ATTACH IF NOT EXISTS '{}' AS {} (TYPE POSTGRES)", connection_string, input.name),
-        DbType::Sqlite => format!("ATTACH IF NOT EXISTS '{}' AS {} (TYPE SQLITE)", connection_string, input.name),
-        DbType::DuckDb => format!("ATTACH IF NOT EXISTS '{}' AS {}", connection_string, input.name),
+        DbType::Postgres => format!("ATTACH IF NOT EXISTS {} AS {} (TYPE POSTGRES)", uri, name),
+        DbType::Sqlite => format!("ATTACH IF NOT EXISTS {} AS {} (TYPE SQLITE)", uri, name),
+        DbType::DuckDb => format!("ATTACH IF NOT EXISTS {} AS {}", uri, name),
     }
 }
 
@@ -572,13 +586,13 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
         } else if input.uri.ends_with(".csv") {
             // temporary views: never written into the target file
             format!(
-                "CREATE TEMPORARY VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
-                input.name, input.uri
+                "CREATE TEMPORARY VIEW IF NOT EXISTS {} AS SELECT * FROM read_csv({}, header = true);",
+                quote_ident(&input.name), quote_literal(&input.uri)
             )
         } else if input.uri.ends_with(".parquet") {
             format!(
-                "CREATE TEMPORARY VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
-                input.name, input.uri
+                "CREATE TEMPORARY VIEW IF NOT EXISTS {} AS SELECT * FROM read_parquet({});",
+                quote_ident(&input.name), quote_literal(&input.uri)
             )
         } else {
             // xlsx/json inputs are loaded as tables by the server; there is

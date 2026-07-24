@@ -2,10 +2,11 @@ use eyre::Result;
 use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use libsqlnow::{
-    default_name_and_check, get_app_data, input_into_parts, main_web, query_database,
-    sidecar_path, sniff_db_type, validate_name, Config, DbType, Input, Session, TableData,
+    default_name_and_check, get_app_data, input_into_parts, main_web, parse_table_filter,
+    query_database, sidecar_path, sniff_db_type, validate_name, Config, DbType, Input, Session,
+    TableData,
 };
 use actix_web::{App, HttpServer, web::Data};
 
@@ -48,15 +49,25 @@ struct Cli {
     #[arg(short, long)]
     save: Option<String>,
 
-    /// Pre-defined query, repeatable: "name=SELECT ..." or bare SQL
-    /// (the name is auto-generated when omitted)
+    /// Pre-defined query, repeatable: bare SQL (auto-named) or "name=SELECT ..."
     #[arg(short = 'q', long = "query")]
     query: Vec<String>,
 
-    /// Pre-defined query read from a file, repeatable: "name=path.sql" or
-    /// "path.sql" (the file stem becomes the name)
+    /// Pre-defined query read from a file, repeatable: "path.sql" (the file
+    /// stem becomes the name) or "name=path.sql"
     #[arg(long = "query-file")]
     query_file: Vec<String>,
+
+    /// Name the immediately preceding input or query. The value before
+    /// --as is taken completely literally (no name=/# splitting), so any
+    /// URI, path, or SQL works: -v 'postgresql://h/db?sslmode=disable' --as gem
+    #[arg(long = "as", value_name = "NAME")]
+    input_name: Vec<String>,
+
+    /// Table filter for the immediately preceding database input,
+    /// repeatable: --tables t1,t2
+    #[arg(long = "tables", value_name = "TABLES")]
+    table_filter: Vec<String>,
 
     /// Open the browser on startup. With a name, also start on that query:
     /// --open "top customers"
@@ -144,9 +155,34 @@ fn main_duckdb_candidate(file: &str) -> bool {
     false
 }
 
-/// "name=SELECT ..." when the part before the first '=' is a valid query
-/// name, otherwise the whole spec is SQL.
+/// Anything starting with one of these is treated as bare SQL by -q, never
+/// split at '=' (so `-q "SELECT * FROM t WHERE a=1"` cannot be mangled).
+const SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "WITH", "FROM", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "ATTACH",
+    "DETACH", "PRAGMA", "DESCRIBE", "DESC", "SHOW", "SUMMARIZE", "EXPLAIN", "COPY", "CALL", "SET",
+    "RESET", "VALUES", "TABLE", "PIVOT", "UNPIVOT", "INSTALL", "LOAD", "BEGIN", "COMMIT",
+    "VACUUM", "ANALYZE", "CHECKPOINT", "EXPORT", "IMPORT", "TRUNCATE", "USE",
+];
+
+fn starts_with_sql_keyword(spec: &str) -> bool {
+    let first_word = spec
+        .trim_start()
+        .trim_start_matches('(')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_uppercase();
+    SQL_KEYWORDS.contains(&first_word.as_str())
+}
+
+/// "name=SELECT ..." when the spec does not itself start with a SQL keyword
+/// and the part before the first '=' is a valid query name; otherwise the
+/// whole spec is SQL. (A query whose *name* starts with a SQL keyword can't
+/// be expressed this way — use --as, which takes the SQL literally.)
 fn parse_query_spec(spec: &str) -> (Option<String>, String) {
+    if starts_with_sql_keyword(spec) {
+        return (None, spec.to_string());
+    }
     if let Some((name, sql)) = spec.split_once('=') {
         if validate_name(name).is_ok() {
             return (Some(name.to_string()), sql.to_string());
@@ -155,10 +191,13 @@ fn parse_query_spec(spec: &str) -> (Option<String>, String) {
     (None, spec.to_string())
 }
 
-/// "name=path.sql" or "path.sql" (name defaults to the file stem).
+/// "name=path.sql" or "path.sql" (name defaults to the file stem). A spec
+/// that names an existing file is always just a path.
 fn parse_query_file_spec(spec: &str) -> Result<(String, String)> {
     let (name, path) = match spec.split_once('=') {
-        Some((name, path)) if validate_name(name).is_ok() => (Some(name.to_string()), path.to_string()),
+        Some((name, path)) if !std::path::Path::new(spec).exists() && validate_name(name).is_ok() => {
+            (Some(name.to_string()), path.to_string())
+        }
         _ => (None, spec.to_string()),
     };
     let sql = std::fs::read_to_string(&path)
@@ -172,6 +211,89 @@ fn parse_query_file_spec(spec: &str) -> Result<(String, String)> {
             .to_string(),
     };
     Ok((name, sql))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum EntryKind {
+    View,
+    Table,
+    File,
+    Query,
+    QueryFile,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedEntry {
+    kind: EntryKind,
+    value: String,
+    /// From --as: when set, `value` is taken completely literally.
+    name: Option<String>,
+    /// From --tables.
+    tables: Vec<String>,
+}
+
+/// Reconstruct the command line in order and attach each --as / --tables to
+/// the input or query immediately before it. clap records argument indices,
+/// so the association is exact, not guessed.
+fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
+    enum Token {
+        Entry(EntryKind, String),
+        As(String),
+        Tables(String),
+    }
+
+    let mut tokens: Vec<(usize, Token)> = vec![];
+    let mut collect = |id: &str, make: &dyn Fn(String) -> Token| {
+        if let Some(values) = matches.get_many::<String>(id) {
+            let indices = matches.indices_of(id).expect("indices exist when values do");
+            for (index, value) in indices.zip(values) {
+                tokens.push((index, make(value.clone())));
+            }
+        }
+    };
+    collect("view", &|v| Token::Entry(EntryKind::View, v));
+    collect("table", &|v| Token::Entry(EntryKind::Table, v));
+    collect("files", &|v| Token::Entry(EntryKind::File, v));
+    collect("query", &|v| Token::Entry(EntryKind::Query, v));
+    collect("query_file", &|v| Token::Entry(EntryKind::QueryFile, v));
+    collect("input_name", &|v| Token::As(v));
+    collect("table_filter", &|v| Token::Tables(v));
+    tokens.sort_by_key(|(index, _)| *index);
+
+    let mut entries: Vec<PlannedEntry> = vec![];
+    for (_, token) in tokens {
+        match token {
+            Token::Entry(kind, value) => entries.push(PlannedEntry {
+                kind,
+                value,
+                name: None,
+                tables: vec![],
+            }),
+            Token::As(name) => {
+                let entry = entries.last_mut().ok_or_else(|| {
+                    eyre::eyre!("--as \"{}\" must come after the input or query it names", name)
+                })?;
+                if entry.name.is_some() {
+                    return Err(eyre::eyre!(
+                        "\"{}\" already has a name; --as \"{}\" has nothing to apply to",
+                        entry.value, name
+                    ));
+                }
+                validate_name(&name).map_err(|e| eyre::eyre!("--as \"{}\": {}", name, e))?;
+                entry.name = Some(name);
+            }
+            Token::Tables(list) => {
+                let entry = entries.last_mut().ok_or_else(|| {
+                    eyre::eyre!("--tables must come after the database input it filters")
+                })?;
+                if matches!(entry.kind, EntryKind::Query | EntryKind::QueryFile) {
+                    return Err(eyre::eyre!("--tables cannot apply to a query"));
+                }
+                entry.tables.extend(parse_table_filter(&list));
+            }
+        }
+    }
+    Ok(entries)
 }
 
 fn percent_encode(s: &str) -> String {
@@ -278,6 +400,97 @@ fn print_table(table: &TableData, format: SqlFormat) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(argv: &[&str]) -> Result<Vec<PlannedEntry>> {
+        let matches = <Cli as CommandFactory>::command().get_matches_from(argv);
+        planned_entries(&matches)
+    }
+
+    #[test]
+    fn sql_containing_equals_is_never_split() {
+        let (name, sql) = parse_query_spec("SELECT * FROM t WHERE a=1");
+        assert_eq!(name, None);
+        assert_eq!(sql, "SELECT * FROM t WHERE a=1");
+
+        let (name, sql) = parse_query_spec("update t set a=1");
+        assert_eq!(name, None);
+        assert_eq!(sql, "update t set a=1");
+
+        // FROM-first and parenthesised forms too
+        assert_eq!(parse_query_spec("from t select a=1").0, None);
+        assert_eq!(parse_query_spec("(select 1=1)").0, None);
+    }
+
+    #[test]
+    fn named_query_sugar_still_works() {
+        let (name, sql) = parse_query_spec("top units=SELECT * FROM t");
+        assert_eq!(name.as_deref(), Some("top units"));
+        assert_eq!(sql, "SELECT * FROM t");
+    }
+
+    #[test]
+    fn uris_with_equals_are_never_split() {
+        let input = input_into_parts("postgresql://localhost/db?sslmode=disable").unwrap();
+        assert_eq!(input.name, "");
+        assert_eq!(input.uri, "postgresql://localhost/db?sslmode=disable");
+
+        // named form still splits
+        let input = input_into_parts("pg=postgresql://localhost/db?sslmode=disable").unwrap();
+        assert_eq!(input.name, "pg");
+        assert_eq!(input.uri, "postgresql://localhost/db?sslmode=disable");
+    }
+
+    #[test]
+    fn existing_paths_are_taken_literally() {
+        let dir = std::env::temp_dir().join(format!("sqlnow-cli-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let weird = dir.join("report=2024#final.csv");
+        std::fs::write(&weird, "a\n1\n").unwrap();
+
+        let spec = weird.to_string_lossy().to_string();
+        let input = input_into_parts(&spec).unwrap();
+        assert_eq!(input.uri, spec);
+        assert_eq!(input.name, "");
+        assert!(input.tables.is_empty());
+    }
+
+    #[test]
+    fn table_filter_sugar_still_works() {
+        let input = input_into_parts("db=some.sqlite#a,b").unwrap();
+        assert_eq!(input.name, "db");
+        assert_eq!(input.uri, "some.sqlite");
+        assert_eq!(input.tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn as_attaches_to_the_preceding_entry() {
+        let planned = entries(&[
+            "sqlnow",
+            "-v", "postgresql://h/db?sslmode=disable", "--as", "gem",
+            "-q", "SELECT a=1", "--as", "top units",
+            "-v", "other.sqlite", "--tables", "t1,t2",
+        ])
+        .unwrap();
+        assert_eq!(planned.len(), 3);
+        assert_eq!(planned[0].name.as_deref(), Some("gem"));
+        assert_eq!(planned[0].value, "postgresql://h/db?sslmode=disable");
+        assert_eq!(planned[1].name.as_deref(), Some("top units"));
+        assert_eq!(planned[1].value, "SELECT a=1");
+        assert_eq!(planned[2].name, None);
+        assert_eq!(planned[2].tables, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn as_without_target_is_an_error() {
+        assert!(entries(&["sqlnow", "--as", "gem"]).is_err());
+        assert!(entries(&["sqlnow", "-v", "a.csv", "--as", "x", "--as", "y"]).is_err());
+        assert!(entries(&["sqlnow", "-q", "SELECT 1", "--tables", "t"]).is_err());
+    }
+}
+
 fn run_exec(session_path: &str, sql: &str, format: SqlFormat) -> Result<()> {
     let session = Session::open(std::path::Path::new(session_path))?;
     let table_data = session.raw_sql(sql)?;
@@ -291,7 +504,9 @@ fn run_sql(db_path: &str, sql: &str, format: SqlFormat, limit: Option<usize>) ->
 
 #[actix_web::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = <Cli as CommandFactory>::command().get_matches();
+    let cli = <Cli as FromArgMatches>::from_arg_matches(&matches)
+        .map_err(|e| eyre::eyre!("{}", e))?;
 
     if cli.agents_help {
         print!("{}", AGENTS_MD);
@@ -310,43 +525,69 @@ async fn main() -> Result<()> {
 
     let mut views = vec![];
     let mut tables = vec![];
-
-    if let Some(cli_views) = &cli.view {
-        for file in cli_views.iter() {
-            let mut input = input_into_parts(file);
-            default_name_and_check(&mut input)?;
-            views.push(input);
-        }
-    }
-
-    if let Some(cli_tables) = &cli.table {
-        for file in cli_tables.iter() {
-            let mut input = input_into_parts(file);
-            default_name_and_check(&mut input)?;
-            tables.push(input);
-        }
-    }
-
-    let mut sidecar_files = vec![];
+    let mut sidecar_files: Vec<String> = vec![];
     let mut db = cli.db.clone();
+    // (name, value, from_file) — applied to the session once it is anchored
+    let mut planned_queries: Vec<(Option<String>, String, bool)> = vec![];
 
-    if let Some(cli_files) = &cli.files {
-        for (i, file) in cli_files.iter().enumerate() {
-            // the first positional argument may be the main duckdb database
-            if i == 0 && db.is_none() && main_duckdb_candidate(file) {
-                db = Some(file.clone());
-                continue;
-            }
-            if file.ends_with(".sqlnow") {
-                sidecar_files.push(file.clone());
-                continue;
-            }
-            let mut input = input_into_parts(file);
-            default_name_and_check(&mut input)?;
-            if file.ends_with(".xlsx") || file.ends_with(".json") || file.ends_with(".jsonl") {
-                tables.push(input);
-            } else {
-                views.push(input);
+    let mut first_file_seen = false;
+    for entry in planned_entries(&matches)? {
+        match entry.kind {
+            EntryKind::Query => planned_queries.push((entry.name, entry.value, false)),
+            EntryKind::QueryFile => planned_queries.push((entry.name, entry.value, true)),
+            EntryKind::View | EntryKind::Table | EntryKind::File => {
+                // --as means the value is literal; otherwise the name=uri#tables
+                // shorthand applies (guarded: it never splits existing paths,
+                // URIs, or anything whose left side could not be a name)
+                let mut input = match &entry.name {
+                    Some(name) => Input {
+                        name: name.clone(),
+                        uri: entry.value.clone(),
+                        tables: entry.tables.clone(),
+                    },
+                    None => {
+                        let mut input = input_into_parts(&entry.value)?;
+                        input.tables.extend(entry.tables.clone());
+                        input
+                    }
+                };
+
+                if entry.kind == EntryKind::File {
+                    let is_first = !first_file_seen;
+                    first_file_seen = true;
+                    // the first plain positional may be the main duckdb database
+                    if is_first
+                        && db.is_none()
+                        && input.name.is_empty()
+                        && input.tables.is_empty()
+                        && main_duckdb_candidate(&input.uri)
+                    {
+                        db = Some(input.uri);
+                        continue;
+                    }
+                    if input.uri.ends_with(".sqlnow") {
+                        if !input.name.is_empty() || !input.tables.is_empty() {
+                            return Err(eyre::eyre!(
+                                "session file {} cannot take --as or --tables",
+                                input.uri
+                            ));
+                        }
+                        sidecar_files.push(input.uri);
+                        continue;
+                    }
+                }
+
+                default_name_and_check(&mut input)?;
+                let loads_as_table = entry.kind == EntryKind::Table
+                    || (entry.kind == EntryKind::File
+                        && (input.uri.ends_with(".xlsx")
+                            || input.uri.ends_with(".json")
+                            || input.uri.ends_with(".jsonl")));
+                if loads_as_table {
+                    tables.push(input);
+                } else {
+                    views.push(input);
+                }
             }
         }
     }
@@ -409,18 +650,29 @@ async fn main() -> Result<()> {
     }
 
     // pre-defined queries from the command line (they overwrite same-named
-    // queries already in the session)
-    for spec in cli.query.iter() {
-        match parse_query_spec(spec) {
-            (Some(name), sql) => session.upsert_query(&name, &sql)?,
-            (None, sql) => {
-                session.create_query(None, &sql)?;
+    // queries already in the session; overwritten SQL is kept in history)
+    for (name, value, from_file) in planned_queries {
+        if from_file {
+            let (name, sql) = match name {
+                Some(name) => {
+                    let sql = std::fs::read_to_string(&value)
+                        .map_err(|e| eyre::eyre!("Cannot read query file {}: {}", value, e))?;
+                    (name, sql)
+                }
+                None => parse_query_file_spec(&value)?,
+            };
+            session.upsert_query(&name, &sql)?;
+        } else {
+            match (name, value) {
+                (Some(name), sql) => session.upsert_query(&name, &sql)?,
+                (None, spec) => match parse_query_spec(&spec) {
+                    (Some(name), sql) => session.upsert_query(&name, &sql)?,
+                    (None, sql) => {
+                        session.create_query(None, &sql)?;
+                    }
+                },
             }
         }
-    }
-    for spec in cli.query_file.iter() {
-        let (name, sql) = parse_query_file_spec(spec)?;
-        session.upsert_query(&name, &sql)?;
     }
 
     // --open <name> overrides the session's stored open query
