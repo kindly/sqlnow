@@ -58,11 +58,14 @@ pub fn sniff_db_type(path: &str) -> Option<DbType> {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Input {
     pub name: String,
     pub uri: String,
+    /// Only expose these tables (empty = all).
     pub tables: Vec<String>,
+    /// Never expose these tables (applied after `tables`).
+    pub except: Vec<String>,
 }
 
 impl Input {
@@ -359,12 +362,13 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         let external_database = external_database_map.get(&t.catalog);
 
         if let Some(external_database) = external_database {
-            if !external_database.tables.is_empty() {
-                if t.catalog == external_database.name {
-                    if !external_database.tables.contains(&t.name) {
-                        continue;
-                    }
-                } 
+            if t.catalog == external_database.name {
+                if !external_database.tables.is_empty() && !external_database.tables.contains(&t.name) {
+                    continue;
+                }
+                if external_database.except.contains(&t.name) {
+                    continue;
+                }
             }
         }
 
@@ -509,7 +513,11 @@ fn attach_statement(input: &Input) -> String {
 /// Inputs recorded in the file's own `inputs` table, when the file is a
 /// session database. Non-session duckdb files simply have no such table.
 fn own_inputs(conn: &Connection) -> Vec<Input> {
-    let mut stmt = match conn.prepare("SELECT name, uri, tables FROM inputs") {
+    // except_tables was added later; older session files lack the column
+    let mut stmt = match conn
+        .prepare("SELECT name, uri, tables, except_tables FROM inputs")
+        .or_else(|_| conn.prepare("SELECT name, uri, tables, NULL FROM inputs"))
+    {
         Ok(stmt) => stmt,
         Err(_) => return vec![],
     };
@@ -517,10 +525,12 @@ fn own_inputs(conn: &Connection) -> Vec<Input> {
         let name: String = row.get(0)?;
         let uri: String = row.get(1)?;
         let table_list: duckdb::types::Value = row.get(2)?;
+        let except_list: duckdb::types::Value = row.get(3)?;
         Ok(Input {
             name,
             uri,
             tables: session::table_list_from_value(table_list),
+            except: session::table_list_from_value(except_list),
         })
     }) {
         Ok(rows) => rows,
@@ -640,6 +650,7 @@ mod tests {
                     name: "plants".to_string(),
                     uri: csv.to_string_lossy().to_string(),
                     tables: vec![],
+                    except: vec![],
                 },
             )])
             .unwrap();

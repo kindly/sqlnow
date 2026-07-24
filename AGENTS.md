@@ -41,7 +41,7 @@ splitting of any kind), so any URI, path, SQL, or name works:
 
 ```bash
 sqlnow -v 'postgresql://localhost/db?sslmode=disable' --as gem \
-       -v app.sqlite --as "legacy db" --only orders --only customers \
+       -v app.sqlite --as "legacy db" --only orders --except audit_log \
        -q 'SELECT * FROM t WHERE a=1' --as 'top rows'
 ```
 

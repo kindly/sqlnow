@@ -69,6 +69,12 @@ struct Cli {
     #[arg(long = "only", value_name = "TABLE")]
     table_filter: Vec<String>,
 
+    /// Never expose this table from the immediately preceding database
+    /// input; repeat for more: --except audit_log --except secrets.
+    /// Applied after --only. The value is taken literally.
+    #[arg(long = "except", value_name = "TABLE")]
+    table_exclude: Vec<String>,
+
     /// Open the browser on startup. With a name, also start on that query:
     /// --open "top customers"
     #[arg(long, num_args = 0..=1)]
@@ -230,6 +236,8 @@ struct PlannedEntry {
     name: Option<String>,
     /// From --only.
     tables: Vec<String>,
+    /// From --except.
+    except: Vec<String>,
 }
 
 /// Reconstruct the command line in order and attach each --as / --only to
@@ -240,6 +248,7 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
         Entry(EntryKind, String),
         As(String),
         Tables(String),
+        Except(String),
     }
 
     let mut tokens: Vec<(usize, Token)> = vec![];
@@ -258,6 +267,7 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
     collect("query_file", &|v| Token::Entry(EntryKind::QueryFile, v));
     collect("input_name", &|v| Token::As(v));
     collect("table_filter", &|v| Token::Tables(v));
+    collect("table_exclude", &|v| Token::Except(v));
     tokens.sort_by_key(|(index, _)| *index);
 
     let mut entries: Vec<PlannedEntry> = vec![];
@@ -268,6 +278,7 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
                 value,
                 name: None,
                 tables: vec![],
+                except: vec![],
             }),
             Token::As(name) => {
                 let entry = entries.last_mut().ok_or_else(|| {
@@ -291,6 +302,15 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
                 }
                 // one table name per flag, taken literally
                 entry.tables.push(table);
+            }
+            Token::Except(table) => {
+                let entry = entries.last_mut().ok_or_else(|| {
+                    eyre::eyre!("--except must come after the database input it filters")
+                })?;
+                if matches!(entry.kind, EntryKind::Query | EntryKind::QueryFile) {
+                    return Err(eyre::eyre!("--except cannot apply to a query"));
+                }
+                entry.except.push(table);
             }
         }
     }
@@ -490,6 +510,19 @@ mod tests {
         assert!(entries(&["sqlnow", "--as", "gem"]).is_err());
         assert!(entries(&["sqlnow", "-v", "a.csv", "--as", "x", "--as", "y"]).is_err());
         assert!(entries(&["sqlnow", "-q", "SELECT 1", "--only", "t"]).is_err());
+        assert!(entries(&["sqlnow", "-q", "SELECT 1", "--except", "t"]).is_err());
+        assert!(entries(&["sqlnow", "--except", "t"]).is_err());
+    }
+
+    #[test]
+    fn except_attaches_to_the_preceding_input() {
+        let planned = entries(&[
+            "sqlnow",
+            "-v", "app.sqlite", "--only", "orders", "--except", "audit_log",
+        ])
+        .unwrap();
+        assert_eq!(planned[0].tables, vec!["orders"]);
+        assert_eq!(planned[0].except, vec!["audit_log"]);
     }
 }
 
@@ -546,10 +579,12 @@ async fn main() -> Result<()> {
                         name: name.clone(),
                         uri: entry.value.clone(),
                         tables: entry.tables.clone(),
+                        except: entry.except.clone(),
                     },
                     None => {
                         let mut input = input_into_parts(&entry.value)?;
                         input.tables.extend(entry.tables.clone());
+                        input.except.extend(entry.except.clone());
                         input
                     }
                 };

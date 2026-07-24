@@ -18,6 +18,7 @@ const SIDECAR_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS queries(pos INTEGER NOT NULL, name TEXT PRIMARY KEY, sql TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS history(\"at\" TIMESTAMP NOT NULL DEFAULT now(), sql TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS inputs(kind TEXT NOT NULL, name TEXT NOT NULL, uri TEXT NOT NULL, tables TEXT[]);
+    ALTER TABLE inputs ADD COLUMN IF NOT EXISTS except_tables TEXT[];
 ";
 
 const LOCK_RETRIES: u32 = 5;
@@ -375,18 +376,21 @@ impl Session {
 
     pub fn list_inputs(&self) -> std::result::Result<Vec<(String, Input)>, SessionError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT kind, name, uri, tables FROM inputs")?;
+            let mut stmt =
+                conn.prepare("SELECT kind, name, uri, tables, except_tables FROM inputs")?;
             let rows = stmt.query_map([], |row| {
                 let kind: String = row.get(0)?;
                 let name: String = row.get(1)?;
                 let uri: String = row.get(2)?;
-                let tables: duckdb::types::Value = row.get(3)?;
+                let only: duckdb::types::Value = row.get(3)?;
+                let except: duckdb::types::Value = row.get(4)?;
                 Ok((
                     kind,
                     Input {
                         name,
                         uri,
-                        tables: table_list_from_value(tables),
+                        tables: table_list_from_value(only),
+                        except: table_list_from_value(except),
                     },
                 ))
             })?;
@@ -402,8 +406,9 @@ impl Session {
             for (kind, input) in entries {
                 conn.execute(
                     &format!(
-                        "INSERT INTO inputs(kind, name, uri, tables) VALUES (?, ?, ?, {})",
-                        table_list_literal(&input.tables)
+                        "INSERT INTO inputs(kind, name, uri, tables, except_tables) VALUES (?, ?, ?, {}, {})",
+                        table_list_literal(&input.tables),
+                        table_list_literal(&input.except)
                     ),
                     params![kind, input.name, absolute_uri(&input.uri)],
                 )?;
@@ -544,8 +549,9 @@ fn upgrade_legacy_sidecar(path: &Path) -> Result<()> {
         for (kind, input) in &entries {
             conn.execute(
                 &format!(
-                    "INSERT INTO inputs(kind, name, uri, tables) VALUES (?, ?, ?, {})",
-                    table_list_literal(&input.tables)
+                    "INSERT INTO inputs(kind, name, uri, tables, except_tables) VALUES (?, ?, ?, {}, {})",
+                    table_list_literal(&input.tables),
+                    table_list_literal(&input.except)
                 ),
                 params![kind, input.name, absolute_uri(&input.uri)],
             )?;
@@ -653,6 +659,7 @@ pub fn input_into_parts(input: &str) -> Result<Input> {
             name: "".to_owned(),
             uri: input.to_owned(),
             tables: vec![],
+            except: vec![],
         });
     }
 
@@ -666,6 +673,7 @@ pub fn input_into_parts(input: &str) -> Result<Input> {
             name,
             uri: not_name,
             tables: vec![],
+            except: vec![],
         });
     }
 
@@ -674,7 +682,7 @@ pub fn input_into_parts(input: &str) -> Result<Input> {
         None => (not_name, vec![]),
     };
 
-    Ok(Input { name, uri, tables })
+    Ok(Input { name, uri, tables, except: vec![] })
 }
 
 pub fn default_name_and_check(input: &mut Input) -> Result<()> {
@@ -856,11 +864,13 @@ mod tests {
                     uri: "postgresql://example/db".to_string(),
                     // commas and quotes in table names survive storage
                     tables: vec!["a".to_string(), "weird,name".to_string(), "it's".to_string()],
+                    except: vec!["audit,log".to_string()],
                 },
             )])
             .unwrap();
         let inputs = session.list_inputs().unwrap();
         assert_eq!(inputs[0].1.tables, vec!["a", "weird,name", "it's"]);
+        assert_eq!(inputs[0].1.except, vec!["audit,log"]);
     }
 
     #[test]

@@ -29,8 +29,9 @@ cargo build --release                            # target/release/sqlnow
 
 Name an input or query with `--as` (applies to the value immediately before
 it, taken literally — safe for URIs, paths, and SQL containing any
-characters); expose only chosen tables from a database input with
-`--only t1 --only t2` (one literal name per flag):
+characters); limit a database input's tables with `--only t1` and/or
+`--except t2` (repeatable, one literal name per flag; `--except` applies
+after `--only`):
 
 ```
 sqlnow -v postgresql://host/db --as pg -q 'SELECT count(*) FROM pg.public.t' --as counts
