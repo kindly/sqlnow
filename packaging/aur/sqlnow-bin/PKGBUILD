@@ -3,7 +3,7 @@
 # Prebuilt-binary package, repackaging the GitHub release artifacts.
 # After each release: bump pkgver, reset pkgrel, run `updpkgsums`.
 pkgname=sqlnow-bin
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
 arch=('x86_64' 'aarch64')

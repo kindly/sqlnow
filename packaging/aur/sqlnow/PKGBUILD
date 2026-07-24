@@ -4,7 +4,7 @@
 # amalgamation — expect a long build and a few GB of RAM. The web UI is
 # committed pre-built in the repo, so no Node is needed.
 pkgname=sqlnow
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
 arch=('x86_64' 'aarch64')
