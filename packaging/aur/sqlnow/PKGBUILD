@@ -11,6 +11,9 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/kindly/sqlnow"
 license=('MIT')
 makedepends=('cargo')
+# makepkg's default LTO flags produce GCC fat-LTO objects for the bundled
+# DuckDB C++ that rust-lld cannot link
+options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('6f5a12016e04b088fd64adf9884546b5b41a544c9bd3b27cbdea1b4f9b2dc3b6')
 
