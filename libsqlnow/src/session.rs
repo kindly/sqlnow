@@ -162,6 +162,16 @@ impl Session {
         }
     }
 
+    /// Cheap change indicator for file-backed sessions: the sidecar's mtime.
+    /// Reads do not touch it; every write does (duckdb checkpoints on the
+    /// per-operation connection close). None for in-memory sessions.
+    pub fn change_stamp(&self) -> Option<std::time::SystemTime> {
+        match &self.store {
+            Store::File(path) => std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+            Store::Memory(_) => None,
+        }
+    }
+
     fn with_conn<T>(
         &self,
         f: impl FnOnce(&Connection) -> std::result::Result<T, SessionError>,
@@ -219,9 +229,15 @@ impl Session {
     }
 
     /// Insert or overwrite a query by name (used for CLI seeding — CLI wins).
+    /// Overwritten SQL is preserved in history.
     pub fn upsert_query(&self, name: &str, sql: &str) -> std::result::Result<(), SessionError> {
         validate_name(name)?;
         self.with_conn(|conn| {
+            if let Ok(existing) = get_query_on(conn, name) {
+                if existing.sql != sql && !existing.sql.trim().is_empty() {
+                    append_history_on(conn, &existing.sql)?;
+                }
+            }
             let updated = conn.execute("UPDATE queries SET sql = ? WHERE name = ?", params![sql, name])?;
             if updated == 0 {
                 conn.execute(
@@ -235,15 +251,26 @@ impl Session {
     }
 
     /// Update sql and/or rename. Renames follow the `open` pointer.
+    ///
+    /// `base_sql` is the version the writer based its edit on: when it is
+    /// absent or does not match the stored SQL, the write is clobbering
+    /// someone else's version, so the stored SQL is preserved in history
+    /// first. Incremental saves from an editor pass their base and skip
+    /// this.
     pub fn update_query(
         &self,
         name: &str,
         new_sql: Option<&str>,
         new_name: Option<&str>,
+        base_sql: Option<&str>,
     ) -> std::result::Result<StoredQuery, SessionError> {
         self.with_conn(|conn| {
             let mut current = get_query_on(conn, name)?;
             if let Some(sql) = new_sql {
+                let clobbering = base_sql.map(|base| base != current.sql).unwrap_or(true);
+                if clobbering && sql != current.sql && !current.sql.trim().is_empty() {
+                    append_history_on(conn, &current.sql)?;
+                }
                 conn.execute("UPDATE queries SET sql = ? WHERE name = ?", params![sql, name])?;
                 current.sql = sql.to_string();
             }
@@ -700,10 +727,10 @@ mod tests {
         session.create_query(Some("b"), "SELECT 2").unwrap();
         session.set_open(Some("a")).unwrap();
 
-        let err = session.update_query("a", None, Some("b")).unwrap_err();
+        let err = session.update_query("a", None, Some("b"), None).unwrap_err();
         assert!(matches!(err, SessionError::Conflict(_)));
 
-        session.update_query("a", None, Some("c")).unwrap();
+        session.update_query("a", None, Some("c"), None).unwrap();
         assert_eq!(session.open_query().unwrap(), Some("c".to_string()));
 
         session.delete_query("c").unwrap();
@@ -759,6 +786,28 @@ mod tests {
             .unwrap();
         let inputs = session.list_inputs().unwrap();
         assert_eq!(inputs[0].1.tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn clobbered_sql_is_preserved_in_history() {
+        let session = Session::in_memory().unwrap();
+        session.create_query(Some("q"), "SELECT 1").unwrap();
+
+        // an editor save based on the current version: no history entry
+        session.update_query("q", Some("SELECT 2"), None, Some("SELECT 1")).unwrap();
+        assert_eq!(session.list_history(0).unwrap().len(), 0);
+
+        // a writer with no base (agent PUT) clobbers: old sql -> history
+        session.update_query("q", Some("SELECT 3"), None, None).unwrap();
+        assert_eq!(session.list_history(0).unwrap()[0].sql, "SELECT 2");
+
+        // a writer with a stale base clobbers: stored sql -> history
+        session.update_query("q", Some("SELECT 4"), None, Some("SELECT 2")).unwrap();
+        assert_eq!(session.list_history(0).unwrap()[0].sql, "SELECT 3");
+
+        // upsert over an existing query preserves the old sql too
+        session.upsert_query("q", "SELECT 5").unwrap();
+        assert_eq!(session.list_history(0).unwrap()[0].sql, "SELECT 4");
     }
 
     #[test]

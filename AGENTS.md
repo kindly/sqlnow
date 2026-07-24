@@ -105,7 +105,18 @@ curl -s -X DELETE localhost:8080/api/queries/errors              # 204; sql kept
 # run history, newest first (limit=0 or omitted returns everything)
 curl -s "localhost:8080/api/history?limit=50"
 # -> {"history":[{"at":"2026-07-23 21:45:38","sql":"SELECT 42"}]}
+
+# change stream (server-sent events): emits `data: changed` within ~1s of any
+# session change, whatever the writer (this API, the UI, or sqlnow exec)
+curl -sN localhost:8080/api/events
 ```
+
+**Live updates**: the UI subscribes to `/api/events`, so queries you add or
+update on a running server appear in the user's browser within about a
+second — including the query they are currently looking at. Updating an open
+query is safe: the previous SQL is preserved in history before being
+overwritten (a PUT without `base_sql` always archives what it replaces), so
+feel free to push improved versions of a query while the user watches.
 
 Query names are identities: unique, case-sensitive, no `/`, max 100 chars.
 Percent-encode them in URLs. The UI deep link for a query is

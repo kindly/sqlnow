@@ -158,9 +158,17 @@ export default function Root() {
   let navigate = useNavigate();
   let loc = useLocation();
 
-  // no client-side cache: the query list is refetched on every navigation,
-  // so changes from any writer (this UI, an agent via the API or `sqlnow
-  // exec`) show up on the next click
+  // server-sent events: any session change (this UI, an agent via the API,
+  // or an external writer touching the sidecar) bumps sessionVersion
+  let [sessionVersion, setSessionVersion] = useState(0);
+  useEffect(() => {
+    const source = new EventSource("/api/events");
+    source.onmessage = () => setSessionVersion((v) => v + 1);
+    return () => source.close();
+  }, []);
+
+  // no client-side cache: the query list is refetched on navigation and on
+  // every server-side change, so all writers stay in sync
   useEffect(() => {
     let cancelled = false;
     fetchQueries()
@@ -177,7 +185,7 @@ export default function Root() {
         }
       });
     return () => { cancelled = true; };
-  }, [loc.pathname]);
+  }, [loc.pathname, sessionVersion]);
 
   function setTheme(next) {
     setThemeState(next);
@@ -301,7 +309,7 @@ export default function Root() {
         </nav>
       </aside>
 
-      <Outlet context={{ tables, queries, openQuery, theme, vimEnabled }} />
+      <Outlet context={{ tables, queries, openQuery, sessionVersion, theme, vimEnabled }} />
     </div>
   );
 }

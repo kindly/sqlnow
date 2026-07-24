@@ -158,6 +158,9 @@ pub struct AppData {
     /// serializes this server's own sidecar operations; the state itself
     /// lives in the sidecar database.
     pub session: Arc<std::sync::Mutex<Session>>,
+    /// Bumped on every server-side session mutation; combined with the
+    /// sidecar mtime it drives the /api/events change stream.
+    pub session_version: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -474,6 +477,7 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         scope,
         per_connection_sql,
         session,
+        session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
 }
 
@@ -830,6 +834,7 @@ async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest
                 eprintln!("Failed to record query history: {}", e);
             }
         }
+        app_data.session_version.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     match table_data {

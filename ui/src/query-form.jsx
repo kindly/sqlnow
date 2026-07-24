@@ -34,7 +34,7 @@ export default function QueryForm(props) {
   let queryType = props.queryType;
   let queryName = props.queryName;
 
-  let { tables, theme, vimEnabled } = useOutletContext();
+  let { tables, sessionVersion, theme, vimEnabled } = useOutletContext();
   let navigate = useNavigate();
 
   let schema = undefined;
@@ -71,6 +71,10 @@ export default function QueryForm(props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema]);
 
+  // the last SQL known to be on the server: the base for our own saves, and
+  // the reference for applying live changes made by other writers
+  const serverSqlRef = useRef("");
+
   useEffect(() => {
     if (queryType !== "query") {
       return;
@@ -80,6 +84,7 @@ export default function QueryForm(props) {
       .then((fetched) => {
         if (!cancelled) {
           setQuery(fetched);
+          serverSqlRef.current = fetched.sql;
           setSql(fetched.sql);
         }
       })
@@ -90,6 +95,35 @@ export default function QueryForm(props) {
       });
     return () => { cancelled = true; };
   }, [queryType, queryName]);
+
+  // live updates: when the session changes elsewhere, reload this query's
+  // SQL. The editor is only overwritten when there are no unsaved local
+  // edits; any overwritten server version is preserved in history by the
+  // server, so nothing is lost either way.
+  useEffect(() => {
+    if (queryType !== "query" || !sessionVersion) {
+      return;
+    }
+    let cancelled = false;
+    fetchQuery(queryName)
+      .then((fetched) => {
+        if (cancelled) {
+          return;
+        }
+        setQuery(fetched);
+        if (pendingSqlRef.current == null && fetched.sql !== serverSqlRef.current) {
+          serverSqlRef.current = fetched.sql;
+          setSql(fetched.sql);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setQuery(null);
+        }
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionVersion]);
 
   let [columnWidths, setColumnWidths] = useState([])
 
@@ -115,7 +149,10 @@ export default function QueryForm(props) {
     }
     pendingSqlRef.current = null;
     try {
-      await updateQuery(queryName, { sql: value });
+      // base_sql tells the server this is an incremental edit of the version
+      // we last saw, so it does not archive every keystroke save to history
+      await updateQuery(queryName, { sql: value, base_sql: serverSqlRef.current });
+      serverSqlRef.current = value;
     } catch (e) {
       console.error("Failed to save query:", e);
     }
