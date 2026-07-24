@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 description = "Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
 license = "MIT"
-repository = "https://github.com/kindly/querier"
+repository = "https://github.com/kindly/sqlnow"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

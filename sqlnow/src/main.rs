@@ -15,7 +15,7 @@ const AGENTS_MD: &str = include_str!("../../AGENTS.md");
 
 const AFTER_HELP: &str = "For LLM agents: run `sqlnow --agents-help` for the full agent guide \
 (launch recipes, HTTP API, session file format, querying from the command line).\n\
-Also at: https://github.com/kindly/querier/blob/main/AGENTS.md";
+Also at: https://github.com/kindly/sqlnow/blob/main/AGENTS.md";
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None, after_help = AFTER_HELP)]
