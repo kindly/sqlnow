@@ -128,10 +128,24 @@ impl Session {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        if path.exists() && sniff_db_type(&path.to_string_lossy()) != Some(DbType::DuckDb) {
+        let preexisted = path.exists();
+        if preexisted && sniff_db_type(&path.to_string_lossy()) != Some(DbType::DuckDb) {
             upgrade_legacy_sidecar(path)?;
         }
         let conn = open_with_retry(path).map_err(|e| eyre::eyre!("{}", e))?;
+
+        // never quietly add session tables to somebody's existing data
+        // database: a pre-existing duckdb file only counts as a session if
+        // it has the session schema or no tables at all
+        if preexisted && !has_table(&conn, "meta")? && user_table_count(&conn)? > 0 {
+            return Err(eyre::eyre!(
+                "{} is a database with its own tables, not a sqlnow session file — \
+                 refusing to add session tables to it. To query it, use: sqlnow sql {} \"...\"",
+                path.display(),
+                path.display()
+            ));
+        }
+
         conn.execute_batch(SIDECAR_SCHEMA)?;
         let id = ensure_id(&conn)?;
         drop(conn);
@@ -421,6 +435,23 @@ impl Session {
             }
         })
     }
+}
+
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = ?",
+        params![name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn user_table_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn ensure_id(conn: &Connection) -> Result<String> {
@@ -832,6 +863,27 @@ mod tests {
         // upsert over an existing query preserves the old sql too
         session.upsert_query("q", "SELECT 5").unwrap();
         assert_eq!(session.list_history(0).unwrap()[0].sql, "SELECT 4");
+    }
+
+    #[test]
+    fn open_refuses_an_existing_non_session_database() {
+        let path = temp_path("data.duckdb");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE plants(name TEXT);").unwrap();
+        }
+        let err = match Session::open(&path) {
+            Err(err) => err,
+            Ok(_) => panic!("expected open to refuse a non-session database"),
+        };
+        assert!(err.to_string().contains("not a sqlnow session file"), "{}", err);
+
+        // an existing but empty duckdb file is fine to initialise
+        let empty = temp_path("empty.duckdb");
+        {
+            Connection::open(&empty).unwrap();
+        }
+        assert!(Session::open(&empty).is_ok());
     }
 
     #[test]
