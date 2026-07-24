@@ -4,9 +4,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use libsqlnow::{
-    default_name_and_check, get_app_data, input_into_parts, main_web, parse_table_filter,
-    query_database, sidecar_path, sniff_db_type, validate_name, Config, DbType, Input, Session,
-    TableData,
+    default_name_and_check, get_app_data, input_into_parts, main_web, query_database,
+    sidecar_path, sniff_db_type, validate_name, Config, DbType, Input, Session, TableData,
 };
 use actix_web::{App, HttpServer, web::Data};
 
@@ -64,9 +63,10 @@ struct Cli {
     #[arg(long = "as", value_name = "NAME")]
     input_name: Vec<String>,
 
-    /// Table filter for the immediately preceding database input,
-    /// repeatable: --tables t1,t2
-    #[arg(long = "tables", value_name = "TABLES")]
+    /// Only expose this table from the immediately preceding database
+    /// input; repeat for more: --tables orders --tables customers.
+    /// The value is taken literally (any characters work).
+    #[arg(long = "tables", value_name = "TABLE")]
     table_filter: Vec<String>,
 
     /// Open the browser on startup. With a name, also start on that query:
@@ -282,14 +282,15 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
                 validate_name(&name).map_err(|e| eyre::eyre!("--as \"{}\": {}", name, e))?;
                 entry.name = Some(name);
             }
-            Token::Tables(list) => {
+            Token::Tables(table) => {
                 let entry = entries.last_mut().ok_or_else(|| {
                     eyre::eyre!("--tables must come after the database input it filters")
                 })?;
                 if matches!(entry.kind, EntryKind::Query | EntryKind::QueryFile) {
                     return Err(eyre::eyre!("--tables cannot apply to a query"));
                 }
-                entry.tables.extend(parse_table_filter(&list));
+                // one table name per flag, taken literally
+                entry.tables.push(table);
             }
         }
     }
@@ -471,7 +472,7 @@ mod tests {
             "sqlnow",
             "-v", "postgresql://h/db?sslmode=disable", "--as", "gem",
             "-q", "SELECT a=1", "--as", "top units",
-            "-v", "other.sqlite", "--tables", "t1,t2",
+            "-v", "other.sqlite", "--tables", "t1", "--tables", "weird,name",
         ])
         .unwrap();
         assert_eq!(planned.len(), 3);
@@ -480,7 +481,8 @@ mod tests {
         assert_eq!(planned[1].name.as_deref(), Some("top units"));
         assert_eq!(planned[1].value, "SELECT a=1");
         assert_eq!(planned[2].name, None);
-        assert_eq!(planned[2].tables, vec!["t1", "t2"]);
+        // each --tables value is literal — commas are not delimiters
+        assert_eq!(planned[2].tables, vec!["t1", "weird,name"]);
     }
 
     #[test]

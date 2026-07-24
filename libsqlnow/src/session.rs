@@ -375,24 +375,18 @@ impl Session {
 
     pub fn list_inputs(&self) -> std::result::Result<Vec<(String, Input)>, SessionError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT kind, name, uri, coalesce(array_to_string(tables, ','), '') FROM inputs",
-            )?;
+            let mut stmt = conn.prepare("SELECT kind, name, uri, tables FROM inputs")?;
             let rows = stmt.query_map([], |row| {
                 let kind: String = row.get(0)?;
                 let name: String = row.get(1)?;
                 let uri: String = row.get(2)?;
-                let tables: String = row.get(3)?;
+                let tables: duckdb::types::Value = row.get(3)?;
                 Ok((
                     kind,
                     Input {
                         name,
                         uri,
-                        tables: if tables.is_empty() {
-                            vec![]
-                        } else {
-                            tables.split(',').map(|s| s.to_string()).collect()
-                        },
+                        tables: table_list_from_value(tables),
                     },
                 ))
             })?;
@@ -406,11 +400,12 @@ impl Session {
             conn.execute_batch("BEGIN")?;
             conn.execute("DELETE FROM inputs", [])?;
             for (kind, input) in entries {
-                let tables = input.tables.join(",");
                 conn.execute(
-                    "INSERT INTO inputs(kind, name, uri, tables)
-                     VALUES (?, ?, ?, CASE WHEN ? = '' THEN NULL ELSE string_split(?, ',') END)",
-                    params![kind, input.name, absolute_uri(&input.uri), tables, tables],
+                    &format!(
+                        "INSERT INTO inputs(kind, name, uri, tables) VALUES (?, ?, ?, {})",
+                        table_list_literal(&input.tables)
+                    ),
+                    params![kind, input.name, absolute_uri(&input.uri)],
                 )?;
             }
             conn.execute_batch("COMMIT")?;
@@ -434,6 +429,29 @@ impl Session {
                 }
             }
         })
+    }
+}
+
+/// A duckdb list literal for a table filter — names are quoted, so any
+/// characters (including commas) survive storage.
+fn table_list_literal(tables: &[String]) -> String {
+    if tables.is_empty() {
+        return "NULL".to_string();
+    }
+    let quoted: Vec<String> = tables.iter().map(|t| quote_literal(t)).collect();
+    format!("[{}]", quoted.join(", "))
+}
+
+pub(crate) fn table_list_from_value(value: duckdb::types::Value) -> Vec<String> {
+    match value {
+        duckdb::types::Value::List(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                duckdb::types::Value::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
     }
 }
 
@@ -524,11 +542,12 @@ fn upgrade_legacy_sidecar(path: &Path) -> Result<()> {
         let id = id.unwrap_or_else(random_id);
         conn.execute("INSERT INTO meta(key, value) VALUES ('id', ?)", params![id])?;
         for (kind, input) in &entries {
-            let tables = input.tables.join(",");
             conn.execute(
-                "INSERT INTO inputs(kind, name, uri, tables)
-                 VALUES (?, ?, ?, CASE WHEN ? = '' THEN NULL ELSE string_split(?, ',') END)",
-                params![kind, input.name, absolute_uri(&input.uri), tables, tables],
+                &format!(
+                    "INSERT INTO inputs(kind, name, uri, tables) VALUES (?, ?, ?, {})",
+                    table_list_literal(&input.tables)
+                ),
+                params![kind, input.name, absolute_uri(&input.uri)],
             )?;
         }
     }
@@ -835,12 +854,13 @@ mod tests {
                 Input {
                     name: "db".to_string(),
                     uri: "postgresql://example/db".to_string(),
-                    tables: vec!["a".to_string(), "b".to_string()],
+                    // commas and quotes in table names survive storage
+                    tables: vec!["a".to_string(), "weird,name".to_string(), "it's".to_string()],
                 },
             )])
             .unwrap();
         let inputs = session.list_inputs().unwrap();
-        assert_eq!(inputs[0].1.tables, vec!["a", "b"]);
+        assert_eq!(inputs[0].1.tables, vec!["a", "weird,name", "it's"]);
     }
 
     #[test]

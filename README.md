@@ -29,7 +29,8 @@ cargo build --release                            # target/release/sqlnow
 
 Name an input or query with `--as` (applies to the value immediately before
 it, taken literally — safe for URIs, paths, and SQL containing any
-characters); filter database tables with `--tables t1,t2`:
+characters); filter database tables with `--tables t1 --tables t2` (one
+literal name per flag):
 
 ```
 sqlnow -v postgresql://host/db --as pg -q 'SELECT count(*) FROM pg.public.t' --as counts

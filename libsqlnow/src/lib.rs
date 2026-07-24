@@ -509,24 +509,18 @@ fn attach_statement(input: &Input) -> String {
 /// Inputs recorded in the file's own `inputs` table, when the file is a
 /// session database. Non-session duckdb files simply have no such table.
 fn own_inputs(conn: &Connection) -> Vec<Input> {
-    let mut stmt = match conn.prepare(
-        "SELECT name, uri, coalesce(array_to_string(tables, ','), '') FROM inputs",
-    ) {
+    let mut stmt = match conn.prepare("SELECT name, uri, tables FROM inputs") {
         Ok(stmt) => stmt,
         Err(_) => return vec![],
     };
     let rows = match stmt.query_map([], |row| {
         let name: String = row.get(0)?;
         let uri: String = row.get(1)?;
-        let joined: String = row.get(2)?;
+        let table_list: duckdb::types::Value = row.get(2)?;
         Ok(Input {
             name,
             uri,
-            tables: if joined.is_empty() {
-                vec![]
-            } else {
-                joined.split(',').map(|s| s.to_string()).collect()
-            },
+            tables: session::table_list_from_value(table_list),
         })
     }) {
         Ok(rows) => rows,
