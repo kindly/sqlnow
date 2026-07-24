@@ -43,8 +43,13 @@ Server running on http://127.0.0.1:8080
 Open query "top rows": http://127.0.0.1:8080/queries/top%20rows
 ```
 
-`--open <name>` also launches a browser; omit it in headless environments and
-just relay the printed URL. Set `PORT`/`HOST` env vars to control binding.
+`--open <name>` also launches a browser **on the user's desktop** — even when
+you run in a sandbox or background shell. Only pass it on the final launch of
+a server that will keep running for the user. Never use it for test or
+verification launches, and never when your processes die with your shell
+(prepare the session and report the launch command instead — include `--open`
+in the command you hand over, not in the ones you run). Otherwise omit it and
+relay the printed URL. Set `PORT`/`HOST` env vars to control binding.
 
 Practical notes that save time:
 
