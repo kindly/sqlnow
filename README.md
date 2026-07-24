@@ -18,7 +18,17 @@ it has copy-paste recipes for launching sessions, seeding queries, and
 reading results and history back. The same guide is embedded in the binary:
 `sqlnow --agents-help`.
 
-## Build
+## Install
+
+Prebuilt single-file binaries are on the
+[releases page](https://github.com/kindly/sqlnow/releases) for Linux
+(x86_64/arm64, also as `.deb` and `.rpm`), macOS (Apple Silicon), and
+Windows — download, unpack, and put `sqlnow` on your `PATH`. Each archive
+has a `.sha256` alongside it.
+
+On Arch Linux: `paru -S sqlnow-bin` (or any AUR helper).
+
+### Build from source
 
 ```
 cd ui && npm install && npm run build && cd ..   # embeds the UI

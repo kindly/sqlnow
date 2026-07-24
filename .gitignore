@@ -23,3 +23,6 @@ bacon.toml
 /.zshrc
 /.idea
 .mcp.json
+
+# local AUR working clone
+/sqlnow-bin/
