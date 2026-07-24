@@ -1,10 +1,8 @@
 # AUR packaging
 
-Two packages, each its own git repo on the AUR:
-
-- `sqlnow-bin` — repackages the GitHub release binaries (primary package)
-- `sqlnow` — builds from the release source tarball (compiles bundled DuckDB;
-  long build)
+One package: `sqlnow-bin`, repackaging the GitHub release binaries.
+(A from-source PKGBUILD existed briefly — see git history — but the bundled
+DuckDB compile makes source installs slow for no benefit, so it was dropped.)
 
 ## Publishing / updating
 
@@ -19,14 +17,12 @@ git commit -m "0.3.0"
 git push origin HEAD:master        # AUR only accepts the master branch!
 ```
 
-Same for `sqlnow` (ssh://aur@aur.archlinux.org/sqlnow.git).
-
 Per release:
 
-1. Bump `pkgver`, reset `pkgrel=1` in both PKGBUILDs here.
-2. Refresh `sha256sums*` against the new release artifacts (`updpkgsums`,
-   or sha256sum the downloaded tarballs).
-3. Copy to the AUR clones, rebuild, regenerate `.SRCINFO`, commit, push.
+1. Bump `pkgver`, reset `pkgrel=1` in the PKGBUILD here.
+2. Refresh `sha256sums_*` against the new release tarballs (`updpkgsums`,
+   or sha256sum the downloaded files).
+3. Copy to the AUR clone, rebuild, regenerate `.SRCINFO`, commit, push.
 
 ## Gotchas learned the hard way
 
@@ -34,8 +30,3 @@ Per release:
   either rename (`git branch -m main master`) or push `HEAD:master`.
 - **`.SRCINFO` must be regenerated on every change** — the AUR site reads it,
   not the PKGBUILD.
-- **`options=('!lto')` is required in the source package**: makepkg's default
-  LTO flags make GCC emit fat-LTO objects for the bundled DuckDB C++, which
-  rust-lld cannot link.
-- The GitHub source tarball extracts to `sqlnow-$pkgver` (repo was renamed
-  from `querier`).
