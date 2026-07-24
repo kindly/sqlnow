@@ -312,6 +312,18 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
     }
 
 
+    // compile the --only/--except patterns once, failing fast on bad ones
+    let mut table_filters: HashMap<String, (Vec<regex::Regex>, Vec<regex::Regex>)> = HashMap::new();
+    for (name, input) in &external_database_map {
+        table_filters.insert(
+            name.clone(),
+            (
+                compile_table_filters(&input.tables)?,
+                compile_table_filters(&input.except)?,
+            ),
+        );
+    }
+
     let mut tabs = vec![];
 
     tabs.push(Tab{
@@ -363,11 +375,13 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
 
         if let Some(external_database) = external_database {
             if t.catalog == external_database.name {
-                if !external_database.tables.is_empty() && !external_database.tables.contains(&t.name) {
-                    continue;
-                }
-                if external_database.except.contains(&t.name) {
-                    continue;
+                if let Some((only, except)) = table_filters.get(&external_database.name) {
+                    if !only.is_empty() && !any_filter_matches(only, &t.name) {
+                        continue;
+                    }
+                    if any_filter_matches(except, &t.name) {
+                        continue;
+                    }
                 }
             }
         }
@@ -495,6 +509,23 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         session,
         session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
+}
+
+/// Compile table filter patterns: fully anchored regular expressions, so a
+/// plain table name matches exactly that table and `entity_.*` works as
+/// expected. Invalid patterns fail at startup with a clear error.
+fn compile_table_filters(patterns: &[String]) -> Result<Vec<regex::Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            regex::Regex::new(&format!("^(?:{})$", pattern))
+                .map_err(|e| eyre::eyre!("invalid table filter pattern \"{}\": {}", pattern, e))
+        })
+        .collect()
+}
+
+fn any_filter_matches(filters: &[regex::Regex], name: &str) -> bool {
+    filters.iter().any(|filter| filter.is_match(name))
 }
 
 /// The ATTACH statement for a database input (only valid when
@@ -669,6 +700,21 @@ mod tests {
         let session = Session::open(&session_path).unwrap();
         let stored = session.raw_sql("SELECT count(*) FROM duckdb_views() WHERE NOT internal").unwrap();
         assert_eq!(stored.rows[0][0], "0");
+    }
+
+    #[test]
+    fn table_filters_are_anchored_regexes() {
+        let filters = compile_table_filters(&["users".into(), "entity_.*".into()]).unwrap();
+        // plain names match exactly, not as substrings
+        assert!(any_filter_matches(&filters, "users"));
+        assert!(!any_filter_matches(&filters, "users_archive"));
+        assert!(!any_filter_matches(&filters, "superusers"));
+        // patterns work
+        assert!(any_filter_matches(&filters, "entity_statement"));
+        assert!(!any_filter_matches(&filters, "person_statement"));
+        // invalid patterns fail loudly with the pattern in the message
+        let err = compile_table_filters(&["cost (usd".into()]).unwrap_err();
+        assert!(err.to_string().contains("cost (usd"));
     }
 
     #[test]

@@ -30,7 +30,8 @@ cargo build --release                            # target/release/sqlnow
 Name an input or query with `--as` (applies to the value immediately before
 it, taken literally — safe for URIs, paths, and SQL containing any
 characters); limit a database input's tables with `--only t1` and/or
-`--except t2` (repeatable, one literal name per flag; `--except` applies
+`--except t2` (repeatable; values are fully-anchored regexes, so plain names
+match exactly and `--only 'entity_.*'` works; `--except` applies
 after `--only`):
 
 ```
@@ -114,7 +115,9 @@ localStorage by older versions are not migrated.
 
 `--port` and `--host` control binding (defaults `8080` on `127.0.0.1`), with
 `PORT`/`HOST` env vars as fallbacks; `WORKERS` env sets worker count
-(default 1).
+(default 1). The UI talks to a JSON API (`/api/queries`, `/api/history`)
+documented in [AGENTS.md](AGENTS.md); exports stream from `POST /outputs`
+as CSV/TSV/JSONL.
 
 ## Security
 
@@ -123,6 +126,4 @@ arbitrary SQL — which, through DuckDB, can read and write files on the host
 (`read_csv('/etc/…')`, `COPY … TO`, `ATTACH`). The default bind is
 loopback-only. Only ever bind (`--host`) to interfaces where every client is
 trusted — e.g. a private tailnet — and never expose it to the public
-internet. The UI talks to a JSON API (`/api/queries`,
-`/api/history`) documented in [AGENTS.md](AGENTS.md); exports stream from
-`POST /outputs` as CSV/TSV/JSONL.
+internet.

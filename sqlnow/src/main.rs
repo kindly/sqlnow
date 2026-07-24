@@ -63,15 +63,15 @@ struct Cli {
     #[arg(long = "as", value_name = "NAME")]
     input_name: Vec<String>,
 
-    /// Only expose this table from the immediately preceding database
-    /// input; repeat for more: --only orders --only customers.
-    /// The value is taken literally (any characters work).
+    /// Only expose matching tables from the immediately preceding database
+    /// input; a fully-anchored regex, so plain names match exactly.
+    /// Repeatable: --only orders --only 'entity_.*' 
     #[arg(long = "only", value_name = "TABLE")]
     table_filter: Vec<String>,
 
-    /// Never expose this table from the immediately preceding database
-    /// input; repeat for more: --except audit_log --except secrets.
-    /// Applied after --only. The value is taken literally.
+    /// Never expose matching tables from the immediately preceding database
+    /// input; a fully-anchored regex, applied after --only.
+    /// Repeatable: --except audit_log --except '.*_secret' 
     #[arg(long = "except", value_name = "TABLE")]
     table_exclude: Vec<String>,
 

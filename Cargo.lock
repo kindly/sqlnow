@@ -2594,6 +2594,7 @@ dependencies = [
  "libflatterer",
  "mime_guess",
  "minijinja 1.0.22",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
