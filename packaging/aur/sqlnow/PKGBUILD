@@ -1,0 +1,36 @@
+# Maintainer: David Raznick <david.raznick@globalenergymonitor.org>
+#
+# From-source package. Note the build compiles the bundled DuckDB C++
+# amalgamation — expect a long build and a few GB of RAM. The web UI is
+# committed pre-built in the repo, so no Node is needed.
+pkgname=sqlnow
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
+arch=('x86_64' 'aarch64')
+url="https://github.com/kindly/querier"
+license=('MIT')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "querier-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "querier-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+package() {
+    cd "querier-$pkgver"
+    install -Dm755 target/release/sqlnow "$pkgdir/usr/bin/sqlnow"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/sqlnow/README.md"
+    install -Dm644 AGENTS.md "$pkgdir/usr/share/doc/sqlnow/AGENTS.md"
+}

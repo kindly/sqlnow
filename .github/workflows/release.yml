@@ -1,48 +1,99 @@
-name: Rust
+# Release builds. Every target compiles natively on its own runner (no
+# cross-compilation — DuckDB's bundled C++ makes cross builds painful), and
+# Linux targets use glibc rather than musl because sqlnow dlopen()s DuckDB
+# extensions at runtime, which static musl binaries cannot do.
+#
+# The web UI is committed pre-built in libsqlnow/static/ and embedded via
+# include_dir, so no Node step is needed here.
+name: Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
 
 jobs:
-  release:
-    name: Release - ${{ matrix.platform.os-name }}
+  build:
+    name: ${{ matrix.target }}
     strategy:
+      fail-fast: false
       matrix:
-        platform:
-          - os-name: Linux-x86_64
-            runs-on: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-
-          - os-name: Windows-x86_64
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04 # oldest supported = lowest glibc floor
+            linux-packages: true
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            linux-packages: true
+          - target: x86_64-apple-darwin
+            runs-on: macos-13 # last Intel runner
+          - target: aarch64-apple-darwin
+            runs-on: macos-latest
+          - target: x86_64-pc-windows-msvc
             runs-on: windows-latest
-            target: x86_64-pc-windows-msvc
 
-          - os-name: macOS-x86_64
-            runs-on: macOS-latest
-            target: x86_64-apple-darwin
-
-          - os-name: macOS-aarch64
-            runs-on: macOS-latest
-            target: aarch64-apple-darwin
-
-    runs-on: ${{ matrix.platform.runs-on }}
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v1
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          command: build
-          target: ${{ matrix.platform.target }}
-          args: "--locked --release"
-          strip: true
-      - name: Publish artifacts and release
-        uses: houseabsolute/actions-rust-release@v0
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/release/sqlnow LICENSE README.md AGENTS.md dist/
+          tar -C dist -czf sqlnow-${{ matrix.target }}.tar.gz sqlnow LICENSE README.md AGENTS.md
+          shasum -a 256 sqlnow-${{ matrix.target }}.tar.gz > sqlnow-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/sqlnow.exe, LICENSE, README.md, AGENTS.md dist/
+          Compress-Archive -Path dist/* -DestinationPath sqlnow-${{ matrix.target }}.zip
+          (Get-FileHash sqlnow-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower() + "  sqlnow-${{ matrix.target }}.zip" | Set-Content sqlnow-${{ matrix.target }}.zip.sha256
+
+      - name: Build .deb and .rpm
+        if: matrix.linux-packages
+        run: |
+          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo deb --no-build --no-strip -p sqlnow -o sqlnow-${{ matrix.target }}.deb
+          cargo generate-rpm -p sqlnow -o sqlnow-${{ matrix.target }}.rpm
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
         with:
-          executable-name: ubi
-          target: ${{ matrix.platform.target }}
+          name: sqlnow-${{ matrix.target }}
+          path: |
+            sqlnow-*.tar.gz*
+            sqlnow-*.zip*
+            sqlnow-*.deb
+            sqlnow-*.rpm
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sqlnow-*.tar.gz*
+            sqlnow-*.zip*
+            sqlnow-*.deb
+            sqlnow-*.rpm

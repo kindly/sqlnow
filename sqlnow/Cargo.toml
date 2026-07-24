@@ -2,8 +2,26 @@
 name = "sqlnow"
 version = "0.2.0"
 edition = "2021"
+description = "Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
+license = "MIT"
+repository = "https://github.com/kindly/querier"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# used by cargo-deb / cargo-generate-rpm in the release workflow
+[package.metadata.deb]
+assets = [
+    ["target/release/sqlnow", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/sqlnow/README.md", "644"],
+    ["../AGENTS.md", "usr/share/doc/sqlnow/AGENTS.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/sqlnow", dest = "/usr/bin/sqlnow", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/sqlnow/README.md", mode = "644", doc = true },
+    { source = "AGENTS.md", dest = "/usr/share/doc/sqlnow/AGENTS.md", mode = "644", doc = true },
+]
 
 [dependencies]
 actix-web = {"workspace" = true}
