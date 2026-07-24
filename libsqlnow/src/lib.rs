@@ -492,12 +492,43 @@ fn attach_statement(input: &Input) -> String {
     }
 }
 
-/// Run SQL directly against a DuckDB database file, without a server. Any
-/// database attaches recorded in the file's session sidecar (`<db>.sqlnow`)
-/// are replayed first, so cross-database queries work the same as in the
-/// UI. Single statements return rows; multi-statement batches return an
-/// empty result. Writes persist — this is the CLI path for agents doing
-/// database work through sqlnow alone.
+/// Inputs recorded in the file's own `inputs` table, when the file is a
+/// session database. Non-session duckdb files simply have no such table.
+fn own_inputs(conn: &Connection) -> Vec<Input> {
+    let mut stmt = match conn.prepare(
+        "SELECT name, uri, coalesce(array_to_string(tables, ','), '') FROM inputs",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return vec![],
+    };
+    let rows = match stmt.query_map([], |row| {
+        let name: String = row.get(0)?;
+        let uri: String = row.get(1)?;
+        let joined: String = row.get(2)?;
+        Ok(Input {
+            name,
+            uri,
+            tables: if joined.is_empty() {
+                vec![]
+            } else {
+                joined.split(',').map(|s| s.to_string()).collect()
+            },
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(_) => return vec![],
+    };
+    rows.filter_map(|r| r.ok()).collect()
+}
+
+/// Run SQL directly against a DuckDB database file, without a server.
+/// Recorded inputs are replayed first so names resolve the same way they do
+/// in the UI: database attaches (and file views, as temporary views) come
+/// from the file's own `inputs` table when it is a session file, and from
+/// its `<db>.sqlnow` sidecar when one exists. Single statements return
+/// rows; multi-statement batches return an empty result. Writes persist —
+/// this is the CLI path for agents doing database work through sqlnow
+/// alone.
 pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableData> {
     let path = std::path::Path::new(db_path);
     if !path.exists() {
@@ -509,30 +540,53 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
 
     let conn = session::open_with_retry(path).map_err(|e| eyre::eyre!("{}", e))?;
 
+    let mut inputs = own_inputs(&conn);
+
     let sidecar = sidecar_path(db_path);
     if sidecar.exists() {
         let session = Session::open(&sidecar)?;
-        let attaches: Vec<Input> = session
-            .list_inputs()
-            .map_err(|e| eyre::eyre!("{}", e))?
-            .into_iter()
-            .map(|(_, input)| input)
-            .filter(|input| input.is_database())
-            .collect();
-        if !attaches.is_empty() {
-            // best effort — extensions may already be loaded, or we may be offline
-            for stmt in [
-                "INSTALL sqlite; LOAD sqlite;",
-                "INSTALL postgres; LOAD postgres;",
-                "SET GLOBAL sqlite_all_varchar = true;",
-            ] {
-                let _ = conn.execute_batch(stmt);
-            }
-            for input in &attaches {
-                if let Err(e) = conn.execute_batch(&attach_statement(input)) {
-                    eprintln!("warning: could not attach {}: {}", input.name, e);
-                }
-            }
+        inputs.extend(
+            session
+                .list_inputs()
+                .map_err(|e| eyre::eyre!("{}", e))?
+                .into_iter()
+                .map(|(_, input)| input),
+        );
+    }
+    inputs.dedup_by(|a, b| a.name == b.name);
+
+    if inputs.iter().any(|input| input.is_database()) {
+        // best effort — extensions may already be loaded, or we may be offline
+        for stmt in [
+            "INSTALL sqlite; LOAD sqlite;",
+            "INSTALL postgres; LOAD postgres;",
+            "SET GLOBAL sqlite_all_varchar = true;",
+        ] {
+            let _ = conn.execute_batch(stmt);
+        }
+    }
+
+    for input in &inputs {
+        let replay = if input.is_database() {
+            attach_statement(input)
+        } else if input.uri.ends_with(".csv") {
+            // temporary views: never written into the target file
+            format!(
+                "CREATE TEMPORARY VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_csv('{}', header = true);",
+                input.name, input.uri
+            )
+        } else if input.uri.ends_with(".parquet") {
+            format!(
+                "CREATE TEMPORARY VIEW IF NOT EXISTS \"{}\" AS SELECT * FROM read_parquet('{}');",
+                input.name, input.uri
+            )
+        } else {
+            // xlsx/json inputs are loaded as tables by the server; there is
+            // nothing lightweight to replay here
+            continue;
+        };
+        if let Err(e) = conn.execute_batch(&replay) {
+            eprintln!("warning: could not replay input {}: {}", input.name, e);
         }
     }
 
@@ -561,6 +615,42 @@ fn fresh_db_connection(app_data: &AppData) -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_database_replays_a_session_files_own_inputs() {
+        let dir = std::env::temp_dir().join(format!("sqlnow-qd-test-{}", random_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("plants.csv");
+        std::fs::write(&csv, "name,co2\nPlant A,120\nPlant B,340\n").unwrap();
+
+        let session_path = dir.join("session.sqlnow");
+        let session = Session::open(&session_path).unwrap();
+        session
+            .set_inputs(&[(
+                "view".to_string(),
+                Input {
+                    name: "plants".to_string(),
+                    uri: csv.to_string_lossy().to_string(),
+                    tables: vec![],
+                },
+            )])
+            .unwrap();
+        drop(session);
+
+        // the recorded view resolves by name, exactly as in the UI
+        let table_data = query_database(
+            &session_path.to_string_lossy(),
+            "SELECT count(*) FROM plants",
+            10,
+        )
+        .unwrap();
+        assert_eq!(table_data.rows[0][0], "2");
+
+        // and the temporary view was not persisted into the session file
+        let session = Session::open(&session_path).unwrap();
+        let stored = session.raw_sql("SELECT count(*) FROM duckdb_views() WHERE NOT internal").unwrap();
+        assert_eq!(stored.rows[0][0], "0");
+    }
 
     #[test]
     fn timestamps_dates_and_times_format_as_text() {

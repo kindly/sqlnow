@@ -142,9 +142,11 @@ curl -s -d 'sql=SELECT * FROM data' -d 'csv=1' localhost:8080/outputs > out.csv
 For database work outside the browser — checking what a session produced,
 building derived tables, extracting results — `sqlnow sql` runs SQL against
 a DuckDB database file using sqlnow's embedded engine. No duckdb install, no
-version mismatch, and attaches recorded in the database's session sidecar
-are replayed automatically, so cross-database queries work like they do in
-the UI:
+version mismatch. Recorded inputs are replayed automatically so names
+resolve the same way they do in the UI: point it at a main database (its
+sidecar's attaches replay) or directly at a session `.sqlnow` file (its own
+recorded attaches and file views replay; file views are temporary, so a
+query never writes them into the session file):
 
 ```bash
 sqlnow sql data.duckdb "SELECT count(*) FROM sales"          # duckdb-style box table
