@@ -253,3 +253,7 @@ tried. Failed queries are recorded too.
 - The server has no authentication and its SQL can read/write host files.
   Leave it on the default loopback bind unless the user asks otherwise, and
   never bind it to a publicly reachable interface.
+- `--only`/`--except` filter the table *listing* only (matched against the
+  bare table name, not schema-qualified); the whole database is attached
+  and hidden tables remain queryable by name. They are for focus, not
+  access control.

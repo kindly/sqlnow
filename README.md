@@ -127,3 +127,7 @@ arbitrary SQL — which, through DuckDB, can read and write files on the host
 loopback-only. Only ever bind (`--host`) to interfaces where every client is
 trusted — e.g. a private tailnet — and never expose it to the public
 internet.
+
+`--only`/`--except` are focus filters, not access control: they decide what
+is listed in the UI, but the whole database is attached and a hidden table
+can still be queried by name.
