@@ -531,6 +531,19 @@ async fn main() -> Result<()> {
     };
 
     let base_url = format!("http://{}:{}", host, port);
+
+    // bind before announcing anything: a failed bind (port already in use)
+    // must not print "Server running" or open a browser tab at a dead URL
+    let server = HttpServer::new(move || {
+      App::new()
+          .configure(main_web)
+          .app_data(Data::new(app_data.clone()))
+      })
+      .bind((host.clone(), port.clone()))
+      .map_err(|e| eyre::eyre!("Could not bind {}: {}", base_url, e))?
+      .workers(workers)
+      .run();
+
     println!("Server running on {}", base_url);
 
     let deep_url = open_query
@@ -542,20 +555,12 @@ async fn main() -> Result<()> {
 
     if cli.open.is_some() {
         let target = deep_url.clone().unwrap_or_else(|| base_url.clone());
-        if let Err(e) = open::that(&target) {
+        if let Err(e) = open::that_detached(&target) {
             eprintln!("Could not open the browser: {}", e);
         }
     }
 
-    HttpServer::new(move || {
-      App::new()
-          .configure(main_web)
-          .app_data(Data::new(app_data.clone()))
-      })
-      .bind((host.clone(), port.clone()))?
-      .workers(workers)
-      .run()
-      .await?;
+    server.await?;
 
     Ok(())
 }
