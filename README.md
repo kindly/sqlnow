@@ -15,7 +15,8 @@ the `sample` query, and opens the browser on it.
 
 If you are an agent integrating with sqlnow, read [AGENTS.md](AGENTS.md) —
 it has copy-paste recipes for launching sessions, seeding queries, and
-reading results and history back.
+reading results and history back. The same guide is embedded in the binary:
+`sqlnow --agents-help`.
 
 ## Build
 

@@ -5,6 +5,10 @@ queries you define up front. This document is the integration reference:
 how to launch sessions, seed queries, point the user at the right place, and
 read back what they did.
 
+This guide ships inside the binary: `sqlnow --agents-help` prints it, so it
+is always available (and always matches the binary's version) even without
+this repository.
+
 ## 1. Launching (the common case)
 
 ```bash

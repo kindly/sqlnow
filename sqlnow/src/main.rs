@@ -9,11 +9,23 @@ use libsqlnow::{
 };
 use actix_web::{App, HttpServer, web::Data};
 
+/// The agent guide ships inside the binary so it is discoverable from the
+/// CLI alone, with no repo checkout.
+const AGENTS_MD: &str = include_str!("../../AGENTS.md");
+
+const AFTER_HELP: &str = "For LLM agents: run `sqlnow --agents-help` for the full agent guide \
+(launch recipes, HTTP API, session file format, querying from the command line).\n\
+Also at: https://github.com/kindly/querier/blob/main/AGENTS.md";
+
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = None, after_help = AFTER_HELP)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+
+    /// Print the guide for LLM agents (AGENTS.md) and exit
+    #[arg(long)]
+    agents_help: bool,
 
     #[arg(short, long)]
     table: Option<Vec<String>>,
@@ -272,6 +284,11 @@ fn run_sql(db_path: &str, sql: &str, format: SqlFormat, limit: Option<usize>) ->
 #[actix_web::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.agents_help {
+        print!("{}", AGENTS_MD);
+        return Ok(());
+    }
 
     match &cli.command {
         Some(Command::Exec { session, sql, format }) => {
