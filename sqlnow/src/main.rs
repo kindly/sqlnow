@@ -64,9 +64,9 @@ struct Cli {
     input_name: Vec<String>,
 
     /// Only expose this table from the immediately preceding database
-    /// input; repeat for more: --tables orders --tables customers.
+    /// input; repeat for more: --only orders --only customers.
     /// The value is taken literally (any characters work).
-    #[arg(long = "tables", value_name = "TABLE")]
+    #[arg(long = "only", value_name = "TABLE")]
     table_filter: Vec<String>,
 
     /// Open the browser on startup. With a name, also start on that query:
@@ -228,11 +228,11 @@ struct PlannedEntry {
     value: String,
     /// From --as: when set, `value` is taken completely literally.
     name: Option<String>,
-    /// From --tables.
+    /// From --only.
     tables: Vec<String>,
 }
 
-/// Reconstruct the command line in order and attach each --as / --tables to
+/// Reconstruct the command line in order and attach each --as / --only to
 /// the input or query immediately before it. clap records argument indices,
 /// so the association is exact, not guessed.
 fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
@@ -284,10 +284,10 @@ fn planned_entries(matches: &clap::ArgMatches) -> Result<Vec<PlannedEntry>> {
             }
             Token::Tables(table) => {
                 let entry = entries.last_mut().ok_or_else(|| {
-                    eyre::eyre!("--tables must come after the database input it filters")
+                    eyre::eyre!("--only must come after the database input it filters")
                 })?;
                 if matches!(entry.kind, EntryKind::Query | EntryKind::QueryFile) {
-                    return Err(eyre::eyre!("--tables cannot apply to a query"));
+                    return Err(eyre::eyre!("--only cannot apply to a query"));
                 }
                 // one table name per flag, taken literally
                 entry.tables.push(table);
@@ -472,7 +472,7 @@ mod tests {
             "sqlnow",
             "-v", "postgresql://h/db?sslmode=disable", "--as", "gem",
             "-q", "SELECT a=1", "--as", "top units",
-            "-v", "other.sqlite", "--tables", "t1", "--tables", "weird,name",
+            "-v", "other.sqlite", "--only", "t1", "--only", "weird,name",
         ])
         .unwrap();
         assert_eq!(planned.len(), 3);
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(planned[1].name.as_deref(), Some("top units"));
         assert_eq!(planned[1].value, "SELECT a=1");
         assert_eq!(planned[2].name, None);
-        // each --tables value is literal — commas are not delimiters
+        // each --only value is literal — commas are not delimiters
         assert_eq!(planned[2].tables, vec!["t1", "weird,name"]);
     }
 
@@ -489,7 +489,7 @@ mod tests {
     fn as_without_target_is_an_error() {
         assert!(entries(&["sqlnow", "--as", "gem"]).is_err());
         assert!(entries(&["sqlnow", "-v", "a.csv", "--as", "x", "--as", "y"]).is_err());
-        assert!(entries(&["sqlnow", "-q", "SELECT 1", "--tables", "t"]).is_err());
+        assert!(entries(&["sqlnow", "-q", "SELECT 1", "--only", "t"]).is_err());
     }
 }
 
@@ -570,7 +570,7 @@ async fn main() -> Result<()> {
                     if input.uri.ends_with(".sqlnow") {
                         if !input.name.is_empty() || !input.tables.is_empty() {
                             return Err(eyre::eyre!(
-                                "session file {} cannot take --as or --tables",
+                                "session file {} cannot take --as or --only",
                                 input.uri
                             ));
                         }
