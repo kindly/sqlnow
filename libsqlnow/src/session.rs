@@ -123,6 +123,11 @@ impl Session {
     /// Open (or create) a sidecar session database. Legacy line-format
     /// sidecars are transparently upgraded to the database format.
     pub fn open(path: &Path) -> Result<Session> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         if path.exists() && sniff_db_type(&path.to_string_lossy()) != Some(DbType::DuckDb) {
             upgrade_legacy_sidecar(path)?;
         }
