@@ -112,6 +112,15 @@ localStorage by older versions are not migrated.
 
 `--port` and `--host` control binding (defaults `8080` on `127.0.0.1`), with
 `PORT`/`HOST` env vars as fallbacks; `WORKERS` env sets worker count
-(default 1). The UI talks to a JSON API (`/api/queries`,
+(default 1).
+
+## Security
+
+sqlnow has **no authentication**, and anyone who can reach the port can run
+arbitrary SQL — which, through DuckDB, can read and write files on the host
+(`read_csv('/etc/…')`, `COPY … TO`, `ATTACH`). The default bind is
+loopback-only. Only ever bind (`--host`) to interfaces where every client is
+trusted — e.g. a private tailnet — and never expose it to the public
+internet. The UI talks to a JSON API (`/api/queries`,
 `/api/history`) documented in [AGENTS.md](AGENTS.md); exports stream from
 `POST /outputs` as CSV/TSV/JSONL.

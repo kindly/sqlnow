@@ -199,7 +199,9 @@ inputs(kind TEXT, name TEXT, uri TEXT, tables TEXT[])  -- managed by the server
 
 `sqlnow exec` runs SQL against a session file using sqlnow's own embedded
 DuckDB — nothing else to install, no version mismatch. It creates the file
-(with the schema) if missing, so you can seed before the first launch:
+(with the schema) if missing, so you can seed before the first launch. It
+refuses to touch an existing database that is not a session file (query
+those with `sqlnow sql` instead):
 
 ```bash
 sqlnow exec session.sqlnow "INSERT INTO queries(pos, name, sql) VALUES
@@ -248,3 +250,6 @@ tried. Failed queries are recorded too.
   key follows renames and is cleared if its query is deleted.
 - Old line-format `.sqlnow` files are auto-upgraded to the database format
   the first time they are used.
+- The server has no authentication and its SQL can read/write host files.
+  Leave it on the default loopback bind unless the user asks otherwise, and
+  never bind it to a publicly reachable interface.
