@@ -1249,7 +1249,7 @@ dependencies = [
  "csv-index",
  "lazy_static",
  "log",
- "minijinja 2.21.0",
+ "minijinja",
  "pathdiff",
  "pdatastructs",
  "petgraph",
@@ -1765,12 +1765,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "glob"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
-
-[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2201,7 +2195,6 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
 dependencies = [
- "glob",
  "include_dir_macros",
 ]
 
@@ -2577,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "libsqlnow"
-version = "0.1.1"
+version = "0.3.1"
 dependencies = [
  "actix-files",
  "actix-web",
@@ -2593,7 +2586,6 @@ dependencies = [
  "include_dir",
  "libflatterer",
  "mime_guess",
- "minijinja 1.0.22",
  "regex",
  "serde",
  "serde_json",
@@ -2737,19 +2729,6 @@ checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
 dependencies = [
  "mime",
  "unicase",
-]
-
-[[package]]
-name = "minijinja"
-version = "1.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3287d827e6da221ea11aa173c66b82ab69db27a1b177e8439f730b478bf33a7b"
-dependencies = [
- "memo-map",
- "percent-encoding",
- "self_cell",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -3991,12 +3970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "self_cell"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813"
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4285,7 +4258,6 @@ dependencies = [
  "csv",
  "eyre",
  "libsqlnow",
- "minijinja 1.0.22",
  "open",
  "serde",
  "serde_json",

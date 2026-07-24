@@ -1,11 +1,9 @@
 [workspace]
 members = ["libsqlnow", "sqlnow"]
-exclude = ["sqlnow-ui"]
 resolver = "2"
 
 [workspace.dependencies]
 actix-web = "4.3.1"
-minijinja = { version = "1.0.3", features = ["loader", "builtins", "urlencode", "json"] }
 tokio = { version = "1.28.2", features = ["time"] }
 clap = { version = "4.3.8", features = ["derive"] }
 eyre = "0.6.8"

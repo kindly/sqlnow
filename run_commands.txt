@@ -1,8 +1,0 @@
-# backend with example data (serves the embedded UI on :8080)
-cargo run -- example_data/example.parquet example_data/sqlite.db
-
-# UI development with hot reload (proxies API calls to :8080)
-cd ui && npm run dev
-
-# rebuild the embedded UI (output lands in libsqlnow/static/, picked up by cargo build)
-cd ui && npm run build

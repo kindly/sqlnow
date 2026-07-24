@@ -25,7 +25,6 @@ assets = [
 
 [dependencies]
 actix-web = {"workspace" = true}
-minijinja = {"workspace" = true}
 tokio = {"workspace" = true}
 clap = {"workspace" = true}
 eyre = {"workspace" = true}

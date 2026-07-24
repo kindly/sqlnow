@@ -14,15 +14,14 @@ use excel::load_xlsx;
 use json::load_json;
 use actix_web::error::{ErrorBadRequest, ErrorInternalServerError};
 use actix_web::{
-    error::Error, get, post, web, web::ServiceConfig, Either, HttpResponse, Responder, web::Bytes
+    error::Error, get, post, web, web::ServiceConfig, HttpResponse, Responder, web::Bytes
 };
 use arrow_cast::display::{ArrayFormatter, FormatOptions};
 use async_stream::stream;
 use csv::WriterBuilder;
 use duckdb::Connection;
 use eyre::Result;
-use include_dir::{include_dir, Dir, DirEntry};
-use minijinja::{context, Environment};
+use include_dir::{include_dir, Dir};
 use serde::{Deserialize, Serialize};
 use serde_json::{self, json};
 use std::collections::HashMap;
@@ -30,7 +29,6 @@ use std::{sync::Arc, vec};
 use tokio::sync::Mutex;
 use duckdb::types::{ListType, ValueRef};
 
-static TEMPLATE_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/templates");
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +150,6 @@ pub struct AppData {
     pub db: Option<String>,
     pub tabs: Vec<Tab>,
     pub sections: Vec<String>,
-    pub env: Environment<'static>,
     pub scope: Option<String>,
     /// ATTACH statements and settings that only live for the lifetime of a
     /// connection. When `db` is set, requests open fresh connections, so
@@ -167,30 +164,7 @@ pub struct AppData {
     pub session_version: Arc<std::sync::atomic::AtomicU64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct History {
-    pub hash: HashMap<String, String>,
-    pub history: Vec<String>,
-}
-
 pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> Result<AppData> {
-    
-    let mut env = Environment::new();
-
-    for glob in ["**/*.html", "**/*.sql"] {
-        for entry in TEMPLATE_DIR.find(glob).expect("template dir should exist") {
-            if let DirEntry::File(file) = entry {
-                let content = file.contents_utf8().expect("utf8 file");
-                let path = file.path();
-                env.add_template_owned(path.to_string_lossy(), content)?;
-            }
-        }
-    }
-
-    env.add_filter("pad", |field: String, number: usize| {
-        " ".repeat((number+4)-field.len())
-    });
-
     let mut db = None;
 
     let connection = match config.database.clone() {
@@ -503,7 +477,6 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         db: db,
         tabs,
         sections: section_list,
-        env,
         scope,
         per_connection_sql,
         session,
@@ -742,7 +715,6 @@ mod tests {
 pub fn main_web(service_config: &mut ServiceConfig) {
     service_config
        .service(sql_query)
-       .service(post_sql)
        .service(static_files)
        .service(tables)
        .service(table)
@@ -937,9 +909,9 @@ struct TableResponse {
 async fn table(app_data: web::Data<AppData>, post_data: web::Form<TableRequest>) -> Result<impl Responder, Error> {
     let table = app_data.tabs.iter().find(|t| t.name == post_data.name).ok_or(ErrorBadRequest("table not found"))?;
 
-    let select_star = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectStar);
-    let select_fields = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectFields);
-    let select_fields_type = generate_sql(&app_data, table.schema.as_ref().expect("checked"), SqlType::SelectFieldsType);
+    let select_star = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectStar);
+    let select_fields = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectFields);
+    let select_fields_type = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectFieldsType);
 
     Ok(HttpResponse::Ok().json(TableResponse {
         table: table.name.clone(),
@@ -1040,30 +1012,6 @@ async fn outputs(
 
 }
 
-// #[get("/")]
-// async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
-//     let tmpl = app_data
-//         .env
-//         .get_template("layout.html")
-//         .expect("template exists");
-
-//     let current_tab = app_data.tabs.get(0).expect("at least one table should exists");
-
-//     let sql = "";
-
-//     let res = tmpl
-//         .render(&context! {
-//             current_tab => current_tab,
-//             tabs => app_data.tabs,
-//             sql => sql,
-//             display_limit => "500",
-//             sections => app_data.sections
-//         })
-//         .map_err(|e| ErrorInternalServerError(e))?;
-
-//     Ok(HttpResponse::Ok().body(res))
-// }
-
 #[derive(PartialEq, Copy, Clone)]
 enum SqlType {
     SelectStar,
@@ -1071,181 +1019,37 @@ enum SqlType {
     SelectFieldsType,
 }
 
-fn generate_sql(app_data: &AppData, schema: &TableMeta, sql_type: SqlType) -> String {
-    let template = match sql_type {
-        SqlType::SelectStar => "select_star.sql",
-        SqlType::SelectFields => "table_schema.sql",
-        SqlType::SelectFieldsType => "table_with_types.sql",
-    };
-
-    let max_field_length = schema.fields.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
-
-    let sql_tmpl = app_data
-        .env
-        .get_template(template)
-        .expect("template exists");
-
-    sql_tmpl
-        .render(&context! {
-            schema  => schema,
-            max_field_length => max_field_length,
-        })
-        .expect("should render")
-}
-
-
-
-
-#[post("/")]
-async fn post_sql(
-    app_data: web::Data<AppData>,
-    q: web::Form<HashMap<String, String>>,
-) -> Result<Either<impl Responder, impl Responder>, Error> {
-    let form = q.clone();
-
-    let current_tab_name = form
-        .get("current_tab")
-        .ok_or(ErrorBadRequest("current_tab not found"))?;
-
-    let current_tab = app_data
-        .tabs
-        .iter()
-        .find(|t| t.name == *current_tab_name)
-        .unwrap();
-
-    let display_limit = form
-        .get("display_limit")
-        .unwrap_or(&"500".to_string())
-        .parse::<usize>()
-        .unwrap_or(1000);
-
-    let mut other_sql = HashMap::new();
-    for (key, value) in form.iter() {
-        if key.starts_with("sql-") {
-            other_sql.insert(key.to_owned(), value.to_owned());
+/// Starter SQL offered on a table tab: select-star, an explicit field list,
+/// or a field list with each column's type as a trailing comment.
+fn generate_sql(schema: &TableMeta, sql_type: SqlType) -> String {
+    let field_lines: Vec<String> = match sql_type {
+        SqlType::SelectStar => vec!["    *".to_owned()],
+        SqlType::SelectFields | SqlType::SelectFieldsType => {
+            let max_field_length =
+                schema.fields.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+            schema
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(i, (field, field_type))| {
+                    let sep = if i + 1 < schema.fields.len() { "," } else { " " };
+                    match sql_type {
+                        SqlType::SelectFieldsType => {
+                            let pad = " ".repeat(max_field_length + 4 - field.len());
+                            format!("    {}{sep}{pad}-- {field_type}", quote_ident(field))
+                        }
+                        _ => format!("    {}{sep}", quote_ident(field)),
+                    }
+                })
+                .collect()
         }
-    }
-
-    let mut sql = match other_sql.remove(&format!("sql-{current_tab_name}")) {
-        Some(sql) => sql.to_owned(),
-        None => {
-            if let Some(schema) = current_tab.schema.as_ref() {
-                generate_sql(&app_data, schema, SqlType::SelectFields)
-            } else { 
-                "".to_owned()
-            }
-        },
     };
 
-    if let Some(new_sql) = form.get("new_sql") {
-        if current_tab.schema.is_some() {
-            if new_sql == "select_star" {
-                sql = generate_sql(&app_data, &current_tab.schema.as_ref().expect("checked"), SqlType::SelectStar);
-            } else if new_sql == "select_fields" {
-                sql = generate_sql(&app_data, &current_tab.schema.as_ref().expect("checked"), SqlType::SelectFields);
-            }
-        }
-    }
-
-    let output_format = if form.contains_key("jsonl") {
-        OutputFormat::JSON
-    } else if form.contains_key("tab") {
-        OutputFormat::TSV
-    } else if form.contains_key("csv") {
-        OutputFormat::CSV
-    } else {
-        OutputFormat::WEB
-    };
-
-    if output_format != OutputFormat::WEB {
-        match output_stream(app_data, sql, output_format).await {
-            Ok(res) => return Ok(Either::Right(res)),
-            Err(e) => return Err(e),
-        }
-    }
-
-    let tmpl = app_data
-        .env
-        .get_template("layout.html")
-        .expect("template exists");
-
-
-    let mutexed_connection = if app_data.connection.is_some() {
-        app_data.connection.clone().unwrap()
-    } else if app_data.db.is_some() {
-        Arc::new(Mutex::new(fresh_db_connection(&app_data)))
-    } else {
-        return Err(ErrorBadRequest("No database connection"));
-    };
-
-    let conn = mutexed_connection.lock().await;
-
-    let other_sql_list: Vec<(String, String)> = other_sql
-        .iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect();
-
-    if current_tab.tab_type == "history" {
-
-        let history_json = form.get("history").ok_or(ErrorBadRequest("history not found"))?;
-        let history = serde_json::from_str::<History>(history_json).map_err(|e| ErrorBadRequest(format!("Bad JSON: {e}")))?;
-
-        let mut sql_history = vec![];
-        for hash in history.history {
-            if let Some(sql) = history.hash.get(&hash) {
-                sql_history.push(sql.clone());
-            }
-        }
-
-        let res = tmpl
-            .render(&context! {
-                current_tab => current_tab,
-                other_sql => other_sql_list,
-                tabs => app_data.tabs,
-                display_limit => display_limit.to_string(),
-                sections => app_data.sections,
-                history => sql_history,
-            })
-            .map_err(|e| ErrorInternalServerError(e))?;
-        return Ok(Either::Left(HttpResponse::Ok().body(res)));
-    }
-
-    let table_data = if sql.is_empty() {
-        Ok(TableData { headers: vec![], rows: vec![] })
-    } else {
-        run_query(&sql.as_str(), &conn, display_limit)
-    };
-
-    if table_data.is_err() {
-        let res = tmpl
-            .render(&context! {
-                current_tab => current_tab,
-                other_sql => other_sql_list,
-                tabs => app_data.tabs.clone(),
-                table_data => TableData { headers: vec![], rows: vec![] },
-                display_limit => display_limit.to_string(),
-                sql => sql,
-                sql_error => table_data.unwrap_err().to_string(),
-                sections => app_data.sections
-            })
-            .map_err(|e| ErrorInternalServerError(e))?;
-
-        return Ok(Either::Left(HttpResponse::Ok().body(res)));
-    }
-
-    let res = tmpl
-        .render(&context! {
-            current_tab => current_tab,
-            other_sql => other_sql_list,
-            tabs => app_data.tabs.clone(),
-            table_data => table_data.unwrap(),
-            display_limit => display_limit.to_string(),
-            sql => sql,
-            sections => app_data.sections
-        })
-        .map_err(|e| ErrorInternalServerError(e))?;
-
-    Ok(Either::Left(HttpResponse::Ok().body(res)))
+    format!(
+        "SELECT\n{}\nFROM\n    {}\nLIMIT 10000",
+        field_lines.join("\n"),
+        schema.db_name
+    )
 }
 
 #[derive(PartialEq, Copy, Clone)]
@@ -1253,7 +1057,6 @@ enum OutputFormat {
     CSV,
     TSV,
     JSON,
-    WEB,
 }
 
 async fn output_stream(
@@ -1316,7 +1119,6 @@ async fn output_stream(
                     yield Ok::<Bytes, Error>(Bytes::from(buf));
                     yield Ok::<Bytes, Error>(Bytes::from("\n"));
                 }
-                OutputFormat::WEB => {}
             }
         }
     };
@@ -1325,14 +1127,12 @@ async fn output_stream(
         OutputFormat::CSV => "attachment; filename=download.csv",
         OutputFormat::TSV => "attachment; filename=download.tsv",
         OutputFormat::JSON => "attachment; filename=download.json",
-        OutputFormat::WEB => "",
     };
 
     let content_type = match output {
         OutputFormat::CSV => "text/csv",
         OutputFormat::TSV => "text/tab-separated-values",
         OutputFormat::JSON => "application/json",
-        OutputFormat::WEB => "text/html",
     };
 
     Ok(HttpResponse::Ok()
