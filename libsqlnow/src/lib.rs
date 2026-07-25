@@ -144,18 +144,32 @@ pub struct TableData {
     pub rows: Vec<Vec<String>>,
 }
 
+/// What the server currently knows it can query.
+///
+/// Derived from the connection rather than accumulated, so attaching or
+/// detaching an input is "run the SQL, then derive this again". It sits behind
+/// a lock in [`AppData`] because that can happen while the server is running.
+pub struct Catalog {
+    pub tabs: Vec<Tab>,
+    pub sections: Vec<String>,
+    /// ATTACH statements and settings that only live for the lifetime of a
+    /// connection. When `db` is set, requests open fresh connections, so
+    /// these are replayed on each one.
+    pub per_connection_sql: Vec<String>,
+    /// The database inputs by name, kept because their --only/--except filters
+    /// have to be applied again every time the catalog is derived.
+    databases: HashMap<String, Input>,
+}
+
 #[derive(Clone)]
 pub struct AppData {
     pub config: Config,
     pub connection: Option<Arc<Mutex<Connection>>>,
     pub db: Option<String>,
-    pub tabs: Vec<Tab>,
-    pub sections: Vec<String>,
+    /// Tabs, sections and the replay list, behind a lock: inputs can be
+    /// attached and detached while the server runs.
+    pub catalog: Arc<std::sync::RwLock<Catalog>>,
     pub scope: Option<String>,
-    /// ATTACH statements and settings that only live for the lifetime of a
-    /// connection. When `db` is set, requests open fresh connections, so
-    /// these are replayed on each one.
-    pub per_connection_sql: Vec<String>,
     /// The session sidecar store (queries, history, inputs). The mutex
     /// serializes this server's own sidecar operations; the state itself
     /// lives in the sidecar database.
@@ -214,51 +228,62 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         }
     }
 
-    let mut external_database_map = HashMap::new();
-    let mut per_connection_sql = vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()];
-
-    let all_varchar = if config.all_text {
-        ", all_varchar = true"
-    } else {
-        ""
+    let mut catalog = Catalog {
+        tabs: vec![],
+        sections: vec![],
+        per_connection_sql: vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()],
+        databases: HashMap::new(),
     };
 
-    for input in config.views.iter() {
-        if input.is_database() {
-            let sql = attach_statement(input);
-            connection.execute_batch(&sql)?;
-            per_connection_sql.push(sql);
-
-            external_database_map.insert(input.name.clone(), input.clone());
-        } else {
-            if input.uri.ends_with(".csv") {
-                connection
-                    .execute_batch(&format!(
-                        "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_csv({}, header = true{all_varchar});",
-                        quote_ident(&input.name), quote_literal(&input.uri)
-                    ))?;
-            } else if input.uri.ends_with(".parquet") {
-                connection
-                    .execute_batch(&format!(
-                        "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_parquet({});",
-                        quote_ident(&input.name), quote_literal(&input.uri)
-                    ))?;
-            } else if input.uri.ends_with(".xlsx") {
-                return Err(eyre::eyre!("XLSX not supported for views"));
-            } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
-                return Err(eyre::eyre!("json not supported for views"));
-            } else {
-                return Err(eyre::eyre!(
-                    "Don't know how to load \"{}\" — expected a database (a .duckdb/.sqlite/.db file, \
-                     sqlite:// or postgresql:// URI) or a .parquet/.csv/.xlsx/.json/.jsonl file",
-                    input.uri
-                ));
-            }
+    for (kind, input) in config
+        .views
+        .iter()
+        .map(|input| ("view", input))
+        .chain(config.tables.iter().map(|input| ("table", input)))
+    {
+        if let Some(sql) = attach_input(&connection, kind, input, config.all_text, config.drop)? {
+            catalog.per_connection_sql.push(sql);
+            catalog.databases.insert(input.name.clone(), input.clone());
         }
     }
 
+    let (tabs, sections) = derive_catalog(&connection, &catalog.databases)?;
+    catalog.tabs = tabs;
+    catalog.sections = sections;
 
-    for input in config.tables.iter() {
+    if catalog.tabs.len() == 1 {
+        return Err(eyre::eyre!("No tables found"));
+    }
+
+    let scope = config.scope.clone();
+
+    Ok(AppData {
+        config,
+        connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
+        db: db,
+        catalog: Arc::new(std::sync::RwLock::new(catalog)),
+        scope,
+        session,
+        session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    })
+}
+
+/// Attach one input to a connection: an ATTACH for a database, a view or a
+/// table for a file. Returns the ATTACH statement when there was one, because
+/// that has to be replayed on every later connection to the main database.
+///
+/// Startup runs this over the inputs it was given; [`add_input`] runs it for
+/// one more while the server is up. Both take the same path, so an input
+/// attached later behaves exactly like one named on the command line.
+fn attach_input(
+    connection: &Connection,
+    kind: &str,
+    input: &Input,
+    all_text: bool,
+    drop: bool,
+) -> Result<Option<String>> {
+    let all_varchar = if all_text { ", all_varchar = true" } else { "" };
+    if kind == "table" {
         if input.is_database() {
             return Err(eyre::eyre!("External database not yet supported for tables"));
         }
@@ -275,21 +300,63 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
                     quote_ident(&input.name), quote_literal(&input.uri)
                 ))?
         } else if input.uri.ends_with(".xlsx") {
-            load_xlsx(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
+            load_xlsx(&input.uri, &input.name, &input.tables, drop, &connection)?;
         } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
-            load_json(&input.uri, &input.name, &input.tables, config.drop, &connection)?;
+            load_json(&input.uri, &input.name, &input.tables, drop, &connection)?;
         } else {
             return Err(eyre::eyre!(
                 "Don't know how to load \"{}\" as a table — expected a .parquet/.csv/.xlsx/.json/.jsonl file",
                 input.uri
             ));
         }
+        return Ok(None);
     }
+    let mut attached = None;
+    if input.is_database() {
+        let sql = attach_statement(input);
+        connection.execute_batch(&sql)?;
+        attached = Some(sql);
+    } else {
+        if input.uri.ends_with(".csv") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_csv({}, header = true{all_varchar});",
+                    quote_ident(&input.name), quote_literal(&input.uri)
+                ))?;
+        } else if input.uri.ends_with(".parquet") {
+            connection
+                .execute_batch(&format!(
+                    "CREATE VIEW IF NOT EXISTS {} AS SELECT * FROM read_parquet({});",
+                    quote_ident(&input.name), quote_literal(&input.uri)
+                ))?;
+        } else if input.uri.ends_with(".xlsx") {
+            return Err(eyre::eyre!("XLSX not supported for views"));
+        } else if input.uri.ends_with(".json") || input.uri.ends_with(".jsonl") {
+            return Err(eyre::eyre!("json not supported for views"));
+        } else {
+            return Err(eyre::eyre!(
+                "Don't know how to load \"{}\" — expected a database (a .duckdb/.sqlite/.db file, \
+                 sqlite:// or postgresql:// URI) or a .parquet/.csv/.xlsx/.json/.jsonl file",
+                input.uri
+            ));
+        }
+    }
+    Ok(attached)
+}
 
-
+/// Build the tab list from what the connection can actually see, applying each
+/// database input's --only/--except filters.
+///
+/// The catalog is derived, never accumulated: after attaching or detaching an
+/// input, re-running this is what makes the change visible, by exactly the
+/// same route as at startup.
+fn derive_catalog(
+    connection: &Connection,
+    databases: &HashMap<String, Input>,
+) -> Result<(Vec<Tab>, Vec<String>)> {
     // compile the --only/--except patterns once, failing fast on bad ones
     let mut table_filters: HashMap<String, (Vec<regex::Regex>, Vec<regex::Regex>)> = HashMap::new();
-    for (name, input) in &external_database_map {
+    for (name, input) in databases {
         table_filters.insert(
             name.clone(),
             (
@@ -346,7 +413,7 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         let t = row.expect("should be able to get table");
         let mut fields = vec![];
 
-        let external_database = external_database_map.get(&t.catalog);
+        let external_database = databases.get(&t.catalog);
 
         if let Some(external_database) = external_database {
             if t.catalog == external_database.name {
@@ -470,19 +537,126 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
     section_list.sort();
     section_list.dedup();
 
-    let scope = config.scope.clone();
+    Ok((tabs, section_list))
+}
 
-    Ok(AppData {
-        config,
-        connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
-        db: db,
-        tabs,
-        sections: section_list,
-        scope,
-        per_connection_sql,
-        session,
-        session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-    })
+/// A connection to run a catalog change on: the shared in-memory one, or a
+/// fresh connection to the main database with the existing attaches replayed.
+async fn catalog_connection(app_data: &AppData) -> Result<Arc<Mutex<Connection>>> {
+    if let Some(connection) = &app_data.connection {
+        return Ok(connection.clone());
+    }
+    if app_data.db.is_some() {
+        return Ok(Arc::new(Mutex::new(fresh_db_connection(app_data))));
+    }
+    Err(eyre::eyre!("no database connection"))
+}
+
+/// Attach an input to the running server and make it visible.
+///
+/// The same path startup takes, so a table added here is indistinguishable
+/// from one named on the command line. With a main database the new view or
+/// table is written into that file and so outlives the run; an attached
+/// database is recorded for replay on later connections instead.
+pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<()> {
+    {
+        let catalog = app_data
+            .catalog
+            .read()
+            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+        if catalog.databases.contains_key(&input.name)
+            || catalog.tabs.iter().any(|tab| tab.name == input.name)
+        {
+            return Err(eyre::eyre!(
+                "\"{}\" is already attached — remove it first to replace it",
+                input.name
+            ));
+        }
+    }
+
+    let mutexed = catalog_connection(app_data).await?;
+    let connection = mutexed.lock().await;
+    let attached = attach_input(&connection, kind, input, app_data.config.all_text, false)?;
+
+    // record the database before deriving, so its --only/--except apply
+    let databases = {
+        let mut catalog = app_data
+            .catalog
+            .write()
+            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+        if let Some(sql) = attached {
+            catalog.per_connection_sql.push(sql);
+            catalog.databases.insert(input.name.clone(), input.clone());
+        }
+        catalog.databases.clone()
+    };
+
+    let (tabs, sections) = derive_catalog(&connection, &databases)?;
+    let mut catalog = app_data
+        .catalog
+        .write()
+        .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+    catalog.tabs = tabs;
+    catalog.sections = sections;
+    Ok(())
+}
+
+/// Detach an input and make it disappear.
+///
+/// A view or table is dropped, which with a main database removes it from that
+/// file for good; an attached database is only detached, and the file it points
+/// at is untouched.
+pub async fn remove_input(app_data: &AppData, name: &str) -> Result<()> {
+    let attach_statement_to_forget = {
+        let catalog = app_data
+            .catalog
+            .read()
+            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+        match catalog.databases.get(name) {
+            Some(input) => Some(attach_statement(input)),
+            None => {
+                if !catalog.tabs.iter().any(|tab| tab.name == name) {
+                    return Err(eyre::eyre!("nothing named \"{}\" is attached", name));
+                }
+                None
+            }
+        }
+    };
+
+    let mutexed = catalog_connection(app_data).await?;
+    let connection = mutexed.lock().await;
+    match &attach_statement_to_forget {
+        Some(_) => connection.execute_batch(&format!("DETACH {};", quote_ident(name)))?,
+        // a view or a table: which one is not worth tracking, so try both
+        None => {
+            let view = format!("DROP VIEW IF EXISTS {};", quote_ident(name));
+            if connection.execute_batch(&view).is_err() {
+                connection
+                    .execute_batch(&format!("DROP TABLE IF EXISTS {};", quote_ident(name)))?;
+            }
+        }
+    }
+
+    let databases = {
+        let mut catalog = app_data
+            .catalog
+            .write()
+            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+        catalog.databases.remove(name);
+        if let Some(sql) = attach_statement_to_forget {
+            catalog.per_connection_sql.retain(|existing| existing != &sql);
+        }
+        catalog.databases.clone()
+    };
+
+    let (tabs, sections) = derive_catalog(&connection, &databases)?;
+    let mut catalog = app_data
+        .catalog
+        .write()
+        .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
+    catalog.tabs = tabs;
+    catalog.sections = sections;
+    Ok(())
 }
 
 /// Compile table filter patterns: fully anchored regular expressions, so a
@@ -627,7 +801,11 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
 /// settings that do not survive across connections.
 fn fresh_db_connection(app_data: &AppData) -> Connection {
     let connection = Connection::open(app_data.db.clone().unwrap()).unwrap();
-    for sql in &app_data.per_connection_sql {
+    let replay = match app_data.catalog.read() {
+        Ok(catalog) => catalog.per_connection_sql.clone(),
+        Err(_) => vec![],
+    };
+    for sql in &replay {
         if let Err(e) = connection.execute_batch(sql) {
             eprintln!("Failed to replay `{}` on new connection: {}", sql, e);
         }
@@ -638,6 +816,66 @@ fn fresh_db_connection(app_data: &AppData) -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inputs_attach_and_detach_while_the_server_runs() {
+        let dir = std::env::temp_dir().join(format!("sqlnow-attach-test-{}", random_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("plants.csv");
+        std::fs::write(&first, "name,co2\nPlant A,120\n").unwrap();
+        let second = dir.join("units.csv");
+        std::fs::write(&second, "name,mw\nUnit 1,50\n").unwrap();
+
+        let session = Session::open(&dir.join("session.sqlnow")).unwrap();
+        let view = |path: &std::path::Path, name: &str| Input {
+            name: name.to_string(),
+            uri: path.to_string_lossy().to_string(),
+            tables: vec![],
+            except: vec![],
+        };
+        let app_data = get_app_data(
+            Config {
+                database: None,
+                views: vec![view(&first, "plants")],
+                tables: vec![],
+                drop: false,
+                all_text: false,
+                scope: None,
+            },
+            Arc::new(std::sync::Mutex::new(session)),
+        )
+        .unwrap();
+
+        let table_names = |app_data: &AppData| {
+            let catalog = app_data.catalog.read().unwrap();
+            let mut names: Vec<String> = catalog
+                .tabs
+                .iter()
+                .filter(|tab| tab.tab_type == "table")
+                .map(|tab| tab.name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(table_names(&app_data), vec!["plants"]);
+
+        actix_web::rt::System::new().block_on(async {
+            add_input(&app_data, "view", &view(&second, "units")).await.unwrap();
+            assert_eq!(table_names(&app_data), vec!["plants", "units"]);
+
+            // the same name twice is refused rather than silently ignored
+            let clash = add_input(&app_data, "view", &view(&second, "units")).await;
+            assert!(clash.is_err(), "attaching a name twice should fail");
+
+            remove_input(&app_data, "units").await.unwrap();
+            assert_eq!(table_names(&app_data), vec!["plants"]);
+
+            assert!(
+                remove_input(&app_data, "units").await.is_err(),
+                "detaching something absent should fail"
+            );
+        });
+    }
 
     #[test]
     fn query_database_replays_a_session_files_own_inputs() {
@@ -881,12 +1119,16 @@ async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
 
 #[post("/tables.json")]
 async fn tables(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
-    let table_tabs = app_data.tabs.iter().filter(
+    let catalog = app_data
+        .catalog
+        .read()
+        .map_err(|_| ErrorInternalServerError("catalog lock poisoned"))?;
+    let table_tabs = catalog.tabs.iter().filter(
         |t| t.tab_type == "table"
     ).collect::<Vec<&Tab>>();
     let output = json!({
         "tables": table_tabs,
-        "sections": app_data.sections.clone()
+        "sections": catalog.sections.clone()
     });
 
     Ok(HttpResponse::Ok().json(output))
@@ -908,7 +1150,11 @@ struct TableResponse {
 
 #[post("/table.json")]
 async fn table(app_data: web::Data<AppData>, post_data: web::Form<TableRequest>) -> Result<impl Responder, Error> {
-    let table = app_data.tabs.iter().find(|t| t.name == post_data.name).ok_or(ErrorBadRequest("table not found"))?;
+    let catalog = app_data
+        .catalog
+        .read()
+        .map_err(|_| ErrorInternalServerError("catalog lock poisoned"))?;
+    let table = catalog.tabs.iter().find(|t| t.name == post_data.name).ok_or(ErrorBadRequest("table not found"))?;
 
     let select_star = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectStar);
     let select_fields = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectFields);

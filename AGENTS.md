@@ -138,6 +138,35 @@ curl -s "localhost:8080/api/history?limit=50"
 curl -sN localhost:8080/api/events
 ```
 
+**Attaching data to a running session.** You do not have to relaunch to add a
+file or database — the new tables appear in the user's sidebar within about a
+second, and are recorded so later launches replay them:
+
+```bash
+# what the session will replay next time
+curl -s localhost:8080/api/inputs
+
+# attach a file: "as" names it (default: the file stem), "kind" is
+# "view" (query it where it lies, the default) or "table" (read it in once)
+curl -s -X POST localhost:8080/api/inputs \
+  -H 'content-type: application/json' \
+  -d '{"uri":"/data/plants.parquet"}'                       # -> 201
+
+# a database, named, with the same table filters as --only/--except
+curl -s -X POST localhost:8080/api/inputs \
+  -H 'content-type: application/json' \
+  -d '{"uri":"postgresql://localhost/db","as":"pg","only":["entity_.*"]}'
+
+# detach by name — 204, or 404 if nothing has that name
+curl -s -X DELETE localhost:8080/api/inputs/plants
+```
+
+Attaching a name that is taken is a 400 rather than a silent no-op: detach it
+first to replace it. A path that does not exist is reported before anything is
+attached. **`DELETE` drops the view or table**, so with a main database it
+removes it from that file for good; detaching a *database* input only detaches
+it and leaves the file alone.
+
 **Live updates**: the UI subscribes to `/api/events`, so queries you add or
 update on a running server appear in the user's browser within about a
 second — including the query they are currently looking at. Updating an open

@@ -552,6 +552,43 @@ impl Session {
         })
     }
 
+    /// Record one more input, so it replays on the next launch. Replaces any
+    /// entry of the same name.
+    pub fn add_input(
+        &self,
+        kind: &str,
+        input: &Input,
+    ) -> std::result::Result<(), SessionError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM inputs WHERE session = ? AND name = ?",
+                params![self.id, input.name],
+            )?;
+            conn.execute(
+                &format!(
+                    "INSERT INTO inputs(session, kind, name, uri, tables, except_tables) VALUES (?, ?, ?, ?, {}, {})",
+                    table_list_literal(&input.tables),
+                    table_list_literal(&input.except)
+                ),
+                params![self.id, kind, input.name, absolute_uri(&input.uri)],
+            )?;
+            touch_changed(conn, &self.id)?;
+            Ok(())
+        })
+    }
+
+    /// Forget a recorded input, so it is not replayed again.
+    pub fn remove_input(&self, name: &str) -> std::result::Result<(), SessionError> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM inputs WHERE session = ? AND name = ?",
+                params![self.id, name],
+            )?;
+            touch_changed(conn, &self.id)?;
+            Ok(())
+        })
+    }
+
     /// Run arbitrary SQL against the sidecar (the `sqlnow exec` path).
     /// Single statements return rows; multi-statement batches return an
     /// empty result.

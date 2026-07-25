@@ -20,6 +20,9 @@ pub fn configure(service_config: &mut ServiceConfig) {
         .service(update_query)
         .service(delete_query)
         .service(list_history)
+        .service(list_inputs)
+        .service(create_input)
+        .service(delete_input)
         .service(events);
 }
 
@@ -147,6 +150,112 @@ async fn delete_query(app_data: web::Data<AppData>, name: web::Path<String>) -> 
         |session| session.delete_query(&name),
         |_| HttpResponse::NoContent().finish(),
     )
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NewInput {
+    /// A file path, or a `postgresql://` / `sqlite://` URI.
+    uri: String,
+    /// What to call it. Defaults to the file stem, as on the command line.
+    #[serde(alias = "as")]
+    name: Option<String>,
+    /// "view" (the default: query the file where it lies) or "table" (read it
+    /// into the database once).
+    kind: Option<String>,
+    /// For a database input: only expose these tables, and never these.
+    #[serde(default)]
+    only: Vec<String>,
+    #[serde(default)]
+    except: Vec<String>,
+}
+
+/// The inputs this session will replay on its next launch.
+#[get("/api/inputs")]
+async fn list_inputs(app_data: web::Data<AppData>) -> HttpResponse {
+    let inputs = match app_data.session.lock() {
+        Ok(session) => session.list_inputs(),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+    match inputs {
+        Ok(inputs) => {
+            let recorded: Vec<_> = inputs
+                .iter()
+                .map(|(kind, input)| {
+                    serde_json::json!({
+                        "kind": kind,
+                        "name": input.name,
+                        "uri": input.uri,
+                        "only": input.tables,
+                        "except": input.except,
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(serde_json::json!({ "inputs": recorded }))
+        }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Attach a file or database to the running session.
+///
+/// The table appears in the UI without a restart, and is recorded so later
+/// launches replay it. With a main database, a view or table created here
+/// lives in that file, so only database attaches need recording.
+#[post("/api/inputs")]
+async fn create_input(app_data: web::Data<AppData>, body: web::Json<NewInput>) -> HttpResponse {
+    let kind = body.kind.clone().unwrap_or_else(|| "view".to_string());
+    if kind != "view" && kind != "table" {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({ "error": "kind must be \"view\" or \"table\"" }));
+    }
+
+    let mut input = crate::Input {
+        name: body.name.clone().unwrap_or_default(),
+        uri: body.uri.clone(),
+        tables: body.only.clone(),
+        except: body.except.clone(),
+    };
+    // fills in a missing name from the file stem, and reports a path that is
+    // not there before anything is attached
+    if let Err(e) = crate::default_name_and_check(&mut input) {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e.to_string() }));
+    }
+
+    if let Err(e) = crate::add_input(&app_data, &kind, &input).await {
+        return HttpResponse::BadRequest().json(serde_json::json!({ "error": e.to_string() }));
+    }
+
+    // a file view or table with a main database persists in that database, so
+    // only attaches have to be replayed
+    if app_data.db.is_none() || input.is_database() {
+        if let Ok(session) = app_data.session.lock() {
+            if let Err(e) = session.add_input(&kind, &input) {
+                eprintln!("Attached {} but could not record it: {}", input.name, e);
+            }
+        }
+    }
+    app_data.session_version.fetch_add(1, Ordering::Relaxed);
+
+    HttpResponse::Created().json(serde_json::json!({
+        "name": input.name,
+        "kind": kind,
+        "uri": input.uri,
+    }))
+}
+
+/// Detach an input by name, dropping its view or table.
+#[delete("/api/inputs/{name}")]
+async fn delete_input(app_data: web::Data<AppData>, name: web::Path<String>) -> HttpResponse {
+    if let Err(e) = crate::remove_input(&app_data, &name).await {
+        return HttpResponse::NotFound().json(serde_json::json!({ "error": e.to_string() }));
+    }
+    if let Ok(session) = app_data.session.lock() {
+        if let Err(e) = session.remove_input(&name) {
+            eprintln!("Detached {} but could not forget it: {}", name, e);
+        }
+    }
+    app_data.session_version.fetch_add(1, Ordering::Relaxed);
+    HttpResponse::NoContent().finish()
 }
 
 /// This server's own writes (the counter) plus anyone else's (the session's

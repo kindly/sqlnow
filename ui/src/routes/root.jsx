@@ -229,7 +229,9 @@ export default function Root() {
       .then((returned_tables) => {
         setTables(returned_tables);
       });
-  }, [])
+    // refetched on every session change too, so a table attached or detached
+    // while the server runs appears here without a reload
+  }, [sessionVersion])
 
   return (
     <div className="flex h-full min-h-0 bg-bg font-sans text-[13px] text-ink">

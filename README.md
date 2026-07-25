@@ -75,6 +75,23 @@ For simple names there is also the shorthand `name=uri#table1,table2`
 - `--open <name>` starts the UI on that query (and opens the browser);
   bare `--open` just opens the browser.
 
+## Attaching data to a running session
+
+Inputs are not fixed at startup. `POST /api/inputs` attaches another file or
+database to the server that is already running — the tables appear in the
+sidebar within a second, and are recorded so later launches replay them —
+and `DELETE /api/inputs/<name>` detaches one again:
+
+```
+curl -s localhost:8080/api/inputs                                   # what will replay
+curl -s -X POST localhost:8080/api/inputs -H 'content-type: application/json' \
+  -d '{"uri":"more.parquet"}'                                       # attach
+curl -s -X DELETE localhost:8080/api/inputs/more                    # detach
+```
+
+Detaching drops the view or table, so with a main database it is removed from
+that file; detaching a database input only detaches it.
+
 ## Sessions
 
 Queries and run history live in a **session database** (`.sqlnow`), which is
