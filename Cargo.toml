@@ -1,5 +1,9 @@
 [workspace]
-members = ["libsqlnow", "sqlnow"]
+members = ["libsqlnow", "sqlnow", "sqlnow-desktop"]
+# The desktop shell links webkit2gtk/GTK, so it is opt-in: a plain
+# `cargo build --release` still produces just the portable `sqlnow` binary.
+# Build the window version with `cargo build -p sqlnow-desktop`.
+default-members = ["libsqlnow", "sqlnow"]
 resolver = "2"
 
 [workspace.dependencies]
