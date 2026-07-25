@@ -149,14 +149,16 @@ async fn delete_query(app_data: web::Data<AppData>, name: web::Path<String>) -> 
     )
 }
 
-fn session_stamp(app_data: &AppData) -> (u64, Option<std::time::SystemTime>) {
+/// This server's own writes (the counter) plus anyone else's (the session's
+/// `changed_at`, which an external writer moves too).
+fn session_stamp(app_data: &AppData) -> (u64, Option<i64>) {
     let version = app_data.session_version.load(Ordering::Relaxed);
-    let mtime = app_data
+    let changed = app_data
         .session
         .lock()
         .ok()
         .and_then(|session| session.change_stamp());
-    (version, mtime)
+    (version, changed)
 }
 
 /// Server-sent events: emits `data: changed` (within ~1s) whenever the

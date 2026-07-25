@@ -188,25 +188,38 @@ equivalents are `POST /query.json` (JSON results) and `POST /outputs`
 
 ## 4. Session files and `sqlnow exec`
 
-A session file (`.sqlnow`) is a DuckDB database with this schema:
+A session file (`.sqlnow`) is a DuckDB database with this schema (format 2):
 
 ```sql
-meta(key TEXT PRIMARY KEY, value TEXT)      -- keys: 'id', 'open'
-queries(pos INTEGER, name TEXT PRIMARY KEY, sql TEXT)
-history("at" TIMESTAMP DEFAULT now(), sql TEXT)
-inputs(kind TEXT, name TEXT, uri TEXT, tables TEXT[])  -- managed by the server
+format(version INTEGER)                     -- 2; a higher number is refused
+sessions(id TEXT PRIMARY KEY, key TEXT, path TEXT,
+         last_used TIMESTAMP, changed_at TIMESTAMP)
+meta(session TEXT, key TEXT, value TEXT, PRIMARY KEY (session, key))  -- keys: 'open'
+queries(session TEXT, pos INTEGER, name TEXT, sql TEXT, PRIMARY KEY (session, name))
+history(session TEXT, "at" TIMESTAMP DEFAULT now(), sql TEXT)
+inputs(session TEXT, kind TEXT, name TEXT, uri TEXT, tables TEXT[], except_tables TEXT[])
 ```
 
-`sqlnow exec` runs SQL against a session file using sqlnow's own embedded
+One database can hold **many** sessions, each owning its rows through the
+`session` column: a file you name holds one, and the store under the config
+directory holds every unanchored run. So scope writes by session id — for a
+single-session file, `(SELECT id FROM sessions)` is that one id. Format 1
+files (no `format` table, no `session` column) are migrated in place the
+first time they are opened.
+
+`sqlnow exec` runs SQL against a session database using sqlnow's own embedded
 DuckDB — nothing else to install, no version mismatch. It creates the file
-(with the schema) if missing, so you can seed before the first launch. It
-refuses to touch an existing database that is not a session file (query
-those with `sqlnow sql` instead):
+(with the schema and one session) if missing, so you can seed before the first
+launch, and it works on the multi-session store too. It refuses to touch an
+existing database that is not a session file (query those with `sqlnow sql`
+instead):
 
 ```bash
-sqlnow exec session.sqlnow "INSERT INTO queries(pos, name, sql) VALUES
-  (1, 'top emitters', 'SELECT name, co2 FROM plants ORDER BY co2 DESC LIMIT 50')"
-sqlnow exec session.sqlnow "INSERT INTO meta(key, value) VALUES ('open', 'top emitters')"
+sqlnow exec session.sqlnow "INSERT INTO queries(session, pos, name, sql)
+  SELECT id, 1, 'top emitters', 'SELECT name, co2 FROM plants ORDER BY co2 DESC LIMIT 50'
+  FROM sessions"
+sqlnow exec session.sqlnow "INSERT INTO meta(session, key, value)
+  SELECT id, 'open', 'top emitters' FROM sessions"
 sqlnow session.sqlnow plants.parquet
 ```
 
@@ -215,8 +228,8 @@ Results print as CSV with a header row. Multi-statement input is allowed
 duckdb's dollar-quoting avoids all escaping:
 
 ```bash
-sqlnow exec session.sqlnow "INSERT INTO queries(pos, name, sql) VALUES
-  (1, 'names', \$q\$SELECT name FROM t WHERE note = 'it''s fine'\$q\$)"
+sqlnow exec session.sqlnow "INSERT INTO queries(session, pos, name, sql)
+  SELECT id, 1, 'names', \$q\$SELECT name FROM t WHERE note = 'it''s fine'\$q\$ FROM sessions"
 ```
 
 This also works while a server is running — the server
