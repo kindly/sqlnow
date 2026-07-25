@@ -77,21 +77,51 @@ For simple names there is also the shorthand `name=uri#table1,table2`
 
 ## Sessions
 
-Queries and run history live in a **session file** (`.sqlnow`), which is
-itself a small DuckDB database (tables: `meta`, `queries`, `history`,
-`inputs`). The server reads and writes it directly — there is no other state.
-Where it lives:
+Queries and run history live in a **session database** (`.sqlnow`), which is
+itself a small DuckDB database (tables: `format`, `sessions`, `meta`,
+`queries`, `history`, `inputs`). One database can hold many sessions, each
+owning its rows through a `session` column, and the server reads and writes it
+directly — there is no other state. Where a session lives:
 
 1. With a main database `data.duckdb`, the session is `data.duckdb.sqlnow`
    next to it (only database attaches are recorded there; file tables persist
    in the main db itself).
-2. Otherwise `--save name` anchors the session at `name.sqlnow` and records
-   every input, so `sqlnow name.sqlnow` replays the whole setup — queries and
-   history included.
-3. `sqlnow session.sqlnow` (a session file as the first `.sqlnow` argument)
-   continues that session: new queries and history are written back to it.
-4. With none of the above, the session is in-memory: everything works, but
-   nothing survives the process.
+2. `sqlnow session.sqlnow` (a session file as the first `.sqlnow` argument)
+   continues that session: its inputs replay and new queries and history are
+   written back to it. Create one anywhere with `sqlnow exec name.sqlnow
+   "SELECT 1"`.
+3. With none of the above, the session goes in the **store** —
+   `<config dir>/sqlnow/sessions.sqlnow`, so `~/.config/sqlnow/sessions.sqlnow`
+   on Linux — keyed by the set of inputs the run was given, and its id is
+   printed on startup. Run the same command again and that session resumes,
+   queries and history included. Nothing is ever deleted: one store holding a
+   hundred sessions is a couple of megabytes. If a resumed session records an
+   input that has since moved or gone, the run stops with an error naming it
+   instead of starting up without that table.
+
+Sessions from cases 1 and 2 are recorded in the store as well — just a pointer
+to their file, since their queries and history stay there — so one list covers
+everything you have worked on. `--no-register` leaves a run out of it; the
+session works as usual, but `--resume` will not find it.
+
+`sqlnow --resume` lists sessions, most recently used first, showing what each
+one is — its own file if it has one, otherwise the inputs it was created for
+(and `-` for queries when they live in a file the store cannot count):
+
+```
+#  id        used     queries  session
+1  81b95136  2h ago         3  ~/data/plants.parquet, ~/data/units.csv
+2  7c287423  1d ago         -  ~/work/plants.duckdb.sqlnow
+3  64942c08  3d ago         1  postgresql://host/db
+```
+
+A session whose file has since moved is listed as `(missing)` rather than
+dropped, and resuming it says so instead of quietly starting an empty one.
+
+`sqlnow --resume 2` opens one by position, `sqlnow --resume 64942c` by id, and
+either replays that session's inputs — so you get the tables, queries and
+history back without retyping the launch command. The 20 most recent are
+listed; older ones are still there and can be resumed by id.
 
 Inspect or edit a session with the built-in runner (no duckdb install
 needed): `sqlnow exec session.sqlnow "SELECT * FROM queries"`.

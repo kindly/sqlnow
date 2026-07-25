@@ -24,10 +24,12 @@ sqlnow sales.csv customers.sqlite \
 # long SQL from files
 sqlnow data.parquet --query-file report.sql --query-file "join check=checks/join.sql"
 
-# keep the session (queries + history) for later runs
-sqlnow data.parquet --save analysis -q "peek=SELECT * FROM data LIMIT 100"
-# ... later: continue exactly where it left off
-sqlnow analysis.sqlnow
+# the session (queries + history) is kept automatically, keyed by the inputs
+sqlnow data.parquet -q "peek=SELECT * FROM data LIMIT 100"
+# ... later: the same inputs continue exactly where they left off
+sqlnow data.parquet
+# ... or find it among the recent ones
+sqlnow --resume
 ```
 
 Inputs are positional or via `-v` (view) / `-t` (table): parquet, csv, xlsx,
@@ -74,7 +76,7 @@ Practical notes that save time:
   records the inputs, saves every query, and picks the landing query:
 
   ```bash
-  sqlnow example.parquet data.sqlite --save session \
+  sqlnow example.parquet data.sqlite \
     -q "jurisdictions=SELECT incorporatedInJurisdiction_name, count(*) AS c FROM example GROUP BY 1 ORDER BY c DESC" \
     -q "sample=SELECT * FROM example LIMIT 100" \
     --open jurisdictions
@@ -257,8 +259,23 @@ tried. Failed queries are recorded too.
 - One server per session file; while running, the server is the writer of
   record. Use the HTTP API for live changes; direct `exec` writes work but
   can race a concurrent server operation.
-- Sessions without an anchor (`--db`/first-duckdb, `--save`, or a replayed
-  `.sqlnow`) are in-memory: the API works, nothing persists.
+- Runs without an anchor (`--db`/first-duckdb, or a replayed `.sqlnow`) still
+  get a session: it lives in the store, `<config dir>/sqlnow/sessions.sqlnow`,
+  keyed by the inputs, and its id is printed on startup. The same inputs resume
+  the same session, so queries and history come back, and nothing is ever
+  deleted. An input the session records that has since gone missing is an
+  error, not a silently skipped table. For a session in a file of its own,
+  create it with `sqlnow exec <path>.sqlnow "SELECT 1"` and pass that file on
+  the command line.
+- Sessions that live in a file (a database sidecar, or a `.sqlnow` you name)
+  are recorded in the store too — a pointer row holding the path, with the
+  queries and history staying in that file. So one list covers every session,
+  wherever it lives. `--no-register` leaves a run out of the list.
+- `sqlnow --resume` lists sessions (most recent first, showing each one's own
+  file or the inputs it was created for) and exits; `sqlnow --resume <n|id>`
+  opens one by position or id and replays its inputs. Use it to find the
+  session a user was last in without asking them for the path. A session whose
+  file has moved is listed as `(missing)` and refuses to resume.
 - Query names are the identity — renaming changes the URL. The `open` meta
   key follows renames and is cleared if its query is deleted.
 - Old line-format `.sqlnow` files are auto-upgraded to the database format
