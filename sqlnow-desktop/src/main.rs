@@ -14,7 +14,7 @@ use eyre::Result;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 
 /// What the server thread reports back once it is listening.
-type Bound = (SocketAddr, Option<String>);
+type Bound = (SocketAddr, Option<String>, sqlnow::Closer);
 
 fn main() -> Result<()> {
     let (cli, matches) = sqlnow::parse_args()?;
@@ -37,14 +37,14 @@ fn main() -> Result<()> {
             // Port 0 unless asked otherwise: an app launched twice must not
             // fail on a busy 8080, and the real port is read back after bind.
             let (server, addr) = sqlnow::serve(prepared.app_data, &host, prepared.port.unwrap_or(0))?;
-            Ok::<_, eyre::Report>((server, addr, prepared.open_query))
+            Ok::<_, eyre::Report>((server, addr, prepared.open_query, prepared.closer))
         });
 
         match started {
-            Ok((server, addr, open_query)) => {
+            Ok((server, addr, open_query, closer)) => {
                 // announce only after a successful bind, so the window is
                 // never pointed at an address that does not answer
-                if tx.send(Ok((addr, open_query))).is_err() {
+                if tx.send(Ok((addr, open_query, closer))).is_err() {
                     return;
                 }
                 if let Err(e) = system.block_on(server) {
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
         }
     });
 
-    let (addr, open_query) = rx
+    let (addr, open_query, closer) = rx
         .recv()
         .map_err(|_| eyre::eyre!("the sqlnow server thread stopped before it bound a port"))??;
 
@@ -86,6 +86,9 @@ fn main() -> Result<()> {
         })
         .run(tauri::generate_context!())
         .map_err(|e| eyre::eyre!("{}", e))?;
+
+    // the window has closed, so the session was last used just now
+    closer.mark_used();
 
     Ok(())
 }

@@ -552,6 +552,18 @@ impl Session {
         })
     }
 
+    /// Record that the session is in use now.
+    ///
+    /// Called when a run opens a session and again when it ends: from the
+    /// outside, "last used" means when you finished with it, so a session you
+    /// just closed belongs at the top of the list.
+    pub fn touch_used(&self) -> std::result::Result<(), SessionError> {
+        self.with_conn(|conn| {
+            conn.execute("UPDATE sessions SET last_used = now() WHERE id = ?", params![self.id])?;
+            Ok(())
+        })
+    }
+
     /// Record one more input, so it replays on the next launch. Replaces any
     /// entry of the same name.
     pub fn add_input(

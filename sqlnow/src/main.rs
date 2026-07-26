@@ -33,5 +33,8 @@ async fn main() -> Result<()> {
 
     server.await?;
 
+    // the session was last used just now, not when it opened
+    prepared.closer.mark_used();
+
     Ok(())
 }

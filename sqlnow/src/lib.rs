@@ -791,6 +791,38 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
 }
 
 /// A session that is attached and ready to be served.
+/// Records that a session has been used, at the moment a run stops using it.
+///
+/// Sessions are listed by when they were last used, and from the outside that
+/// means when you closed the window — not when you opened it. Without this, a
+/// session you worked in all afternoon sorts below one you glanced at first
+/// thing in the morning.
+pub struct Closer {
+    session: Arc<Mutex<Session>>,
+    /// For a session in a file of its own: the store to refresh, and what its
+    /// row there points at. A session held in the store needs neither, because
+    /// the row being touched is already the one the listing reads.
+    registry: Option<(PathBuf, PathBuf)>,
+}
+
+impl Closer {
+    /// Best effort: a session that cannot be touched on the way out is only
+    /// mis-sorted in a listing, which is no reason to fail a run that worked.
+    pub fn mark_used(&self) {
+        let session = match self.session.lock() {
+            Ok(session) => session,
+            Err(_) => return,
+        };
+        if let Err(e) = session.touch_used() {
+            eprintln!("note: could not record the session as used ({})", e);
+            return;
+        }
+        if let Some((store, reopen)) = &self.registry {
+            let _ = register_session(store, session.id(), reopen);
+        }
+    }
+}
+
 pub struct Prepared {
     /// DuckDB connection state and tabs, ready to hand to [`serve`].
     pub app_data: AppData,
@@ -802,6 +834,8 @@ pub struct Prepared {
     /// its own default: 8080 for the CLI, an ephemeral port for the desktop
     /// app, where a fixed port would collide between windows.
     pub port: Option<u16>,
+    /// Call [`Closer::mark_used`] when the run ends.
+    pub closer: Closer,
 }
 
 /// Turn parsed arguments into an attached, queryable session: resolve inputs,
@@ -941,11 +975,14 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     // own rows happen to live. The pointer is advisory: the session itself
     // works whether or not the store can be written.
     let reopen = db.clone().map(PathBuf::from).or_else(|| kept.clone());
+    let mut registry = None;
     if let (false, Some(path), Some(store)) = (cli.no_register, reopen, store_path()) {
         if let Err(e) = register_session(&store, session.id(), &path) {
             eprintln!("note: could not add {} to the session list ({})", path.display(), e);
         }
+        registry = Some((store, path));
     }
+
 
     // A resumed session is only usable if everything it recorded is still
     // reachable: quietly dropping an input would leave the session looking
@@ -1064,6 +1101,7 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     };
 
     let session = Arc::new(Mutex::new(session));
+    let closer = Closer { session: session.clone(), registry };
 
     let app_data = {
         let session = session.clone();
@@ -1127,7 +1165,7 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     let port = cli.port
         .or_else(|| env::var("PORT").ok().and_then(|val| val.parse().ok()));
 
-    Ok(Prepared { app_data, open_query, host, port })
+    Ok(Prepared { app_data, open_query, host, port, closer })
 }
 
 /// Bind the HTTP server and return it alongside the address it actually got.
