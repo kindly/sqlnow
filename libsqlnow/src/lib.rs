@@ -1436,9 +1436,11 @@ async fn output_stream(
         headers.extend(statement.column_names());
 
         match output {
-            OutputFormat::CSV => {
-                let buf = Vec::new();
-                let mut writer = WriterBuilder::new().from_writer(buf);
+            // a tabular export needs its column names as much as a csv does;
+            // the json line formats carry their keys on every row instead
+            OutputFormat::CSV | OutputFormat::TSV => {
+                let delimiter = if matches!(output, OutputFormat::TSV) { b'\t' } else { b',' };
+                let mut writer = WriterBuilder::new().delimiter(delimiter).from_writer(Vec::new());
                 writer.write_record(&headers).map_err(ErrorInternalServerError)?;
                 let buf = writer.into_inner().map_err(ErrorInternalServerError)?;
                 yield Ok::<Bytes, Error>(Bytes::from(buf));
