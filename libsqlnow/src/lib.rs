@@ -151,10 +151,41 @@ pub struct TableData {
 /// session file, so they are asked per request rather than remembered. What is
 /// left is the in-memory database itself (which nothing can re-derive, since
 /// there is no file behind it), where a main database lives if there is one,
-/// and how to reach the session.
+/// The served connection plus what the main database looked like when it was
+/// opened.
+///
+/// A read-only handle is a snapshot: it does not see writes made after it
+/// opened, and nothing stops another process from making them — duckdb's
+/// read-only lock does not exclude writers. So the file's mtime is checked
+/// before use and the handle reopened when it has moved, which keeps the
+/// server honest about external changes while still holding a connection.
+pub struct Held {
+    connection: Connection,
+    seen: Option<std::time::SystemTime>,
+}
+
+impl Held {
+    pub fn get(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+/// What the server holds for the life of a run.
+///
+/// Deliberately little: the tab list, the attaches to replay and the browser
+/// scope are all questions with answers in the database or the session file, so
+/// they are asked per request rather than remembered.
 #[derive(Clone)]
 pub struct AppData {
-    pub connection: Option<Arc<Mutex<Connection>>>,
+    /// The connection the server serves from: the in-memory database, or a
+    /// **read-only** handle on the main database. Held for the life of the run
+    /// rather than opened per request, which is what makes the main-database
+    /// mode as quick as the in-memory one — and what stops SQL typed in the
+    /// viewer from writing to the user's data. Writes go through
+    /// [`with_main_write`], which swaps it for a read-write handle and back.
+    pub connection: Arc<Mutex<Held>>,
+    /// Set when there is a main database file, so the held connection above is
+    /// the read-only one and can be escalated.
     pub db: Option<String>,
     /// From --text: how a later input is attached. Startup configuration
     /// rather than derived state, so it cannot disagree with anything.
@@ -236,13 +267,94 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         return Err(eyre::eyre!("No tables found"));
     }
 
+    // Startup needed write access to create those views and tables. From here
+    // the server only reads, so the main database is reopened read-only and
+    // held: other processes can still read it (a read-only lock refuses only
+    // writers), and SQL from the viewer cannot change it.
+    let held = match &db {
+        Some(path) => open_main_read_only(path, &databases)?,
+        None => connection,
+    };
+
     Ok(AppData {
-        connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
+        connection: Arc::new(Mutex::new(Held {
+            connection: held,
+            seen: db.as_deref().and_then(main_db_mtime),
+        })),
         db: db,
         all_text: config.all_text,
         session,
         session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
+}
+
+fn main_db_mtime(path: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+/// The held connection, reopened first if the main database changed under it.
+///
+/// One `stat` in the common case. Without this, a write by anything else —
+/// `sqlnow sql`, another tool, an escalation in a second server — would stay
+/// invisible to this one until it restarted.
+async fn held_connection(app_data: &AppData) -> Result<tokio::sync::MutexGuard<'_, Held>> {
+    let mut held = app_data.connection.lock().await;
+    if let Some(path) = &app_data.db {
+        let now = main_db_mtime(path);
+        if now != held.seen {
+            let databases = recorded_databases(app_data);
+            held.connection = open_main_read_only(path, &databases)?;
+            held.seen = now;
+        }
+    }
+    Ok(held)
+}
+
+/// A read-only handle on the main database with the attaches replayed onto it.
+fn open_main_read_only(path: &str, databases: &HashMap<String, Input>) -> Result<Connection> {
+    let config = duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?;
+    let connection = Connection::open_with_flags(path, config)?;
+    replay_onto(&connection, databases);
+    Ok(connection)
+}
+
+/// Attaches do not survive a connection, so every new one gets them again.
+fn replay_onto(connection: &Connection, databases: &HashMap<String, Input>) {
+    let _ = connection.execute_batch("SET GLOBAL sqlite_all_varchar = true;");
+    for sql in databases.values().map(attach_statement) {
+        if let Err(e) = connection.execute_batch(&sql) {
+            eprintln!("Failed to replay `{}` on a new connection: {}", sql, e);
+        }
+    }
+}
+
+/// Run something that has to write to the main database.
+///
+/// The held handle is read-only, so this opens a read-write one for the
+/// operation — allowed within one process even while the read-only handle is
+/// open — and then replaces the held handle, because a read-only connection
+/// does not see writes made after it opened. Attaching a table would otherwise
+/// stay invisible until a restart.
+pub async fn with_main_write<T>(
+    app_data: &AppData,
+    databases: &HashMap<String, Input>,
+    f: impl FnOnce(&Connection) -> Result<T>,
+) -> Result<T> {
+    let mut held = app_data.connection.lock().await;
+    let path = match &app_data.db {
+        // the in-memory database is the scratch space; it is writable already
+        None => return f(held.get()),
+        Some(path) => path.clone(),
+    };
+
+    let writable = Connection::open(&path)?;
+    replay_onto(&writable, databases);
+    let outcome = f(&writable);
+    drop(writable);
+
+    held.connection = open_main_read_only(&path, databases)?;
+    held.seen = main_db_mtime(&path);
+    outcome
 }
 
 /// Attach one input to a connection: an ATTACH for a database, a view or a
@@ -542,24 +654,8 @@ fn recorded_databases(app_data: &AppData) -> HashMap<String, Input> {
 /// far cheaper than the class of bug a remembered copy invites.
 async fn current_catalog(app_data: &AppData) -> Result<(Vec<Tab>, Vec<String>)> {
     let databases = recorded_databases(app_data);
-    let mutexed = catalog_connection(app_data, &databases).await?;
-    let connection = mutexed.lock().await;
-    derive_catalog(&connection, &databases)
-}
-
-/// A connection to run a catalog change on: the shared in-memory one, or a
-/// fresh connection to the main database with the existing attaches replayed.
-async fn catalog_connection(
-    app_data: &AppData,
-    databases: &HashMap<String, Input>,
-) -> Result<Arc<Mutex<Connection>>> {
-    if let Some(connection) = &app_data.connection {
-        return Ok(connection.clone());
-    }
-    if app_data.db.is_some() {
-        return Ok(Arc::new(Mutex::new(fresh_db_connection(app_data, databases))));
-    }
-    Err(eyre::eyre!("no database connection"))
+    let held = held_connection(app_data).await?;
+    derive_catalog(held.get(), &databases)
 }
 
 /// Attach an input to the running server and make it visible.
@@ -576,21 +672,29 @@ pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<
             input.name
         ));
     }
-
-    let mutexed = catalog_connection(app_data, &databases).await?;
-    let connection = mutexed.lock().await;
-    let (tabs, _) = derive_catalog(&connection, &databases)?;
-    if tabs.iter().any(|tab| tab.name == input.name) {
-        return Err(eyre::eyre!(
-            "\"{}\" is already attached — remove it first to replace it",
-            input.name
-        ));
+    {
+        let held = held_connection(app_data).await?;
+        let (tabs, _) = derive_catalog(held.get(), &databases)?;
+        if tabs.iter().any(|tab| tab.name == input.name) {
+            return Err(eyre::eyre!(
+                "\"{}\" is already attached — remove it first to replace it",
+                input.name
+            ));
+        }
     }
 
-    attach_input(&connection, kind, input, app_data.all_text, false)?;
-    // nothing to update: the caller records the input in the session, and the
-    // next reader derives the catalog again
-    Ok(())
+    // creating a view or table writes to the main database, so this is one of
+    // the few places allowed to escalate past the read-only handle
+    let all_text = app_data.all_text;
+    let mut with_new = databases.clone();
+    if input.is_database() {
+        with_new.insert(input.name.clone(), input.clone());
+    }
+    with_main_write(app_data, &with_new, |connection| {
+        attach_input(connection, kind, input, all_text, false)?;
+        Ok(())
+    })
+    .await
 }
 
 /// Detach an input and make it disappear.
@@ -601,25 +705,32 @@ pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<
 pub async fn remove_input(app_data: &AppData, name: &str) -> Result<()> {
     let databases = recorded_databases(app_data);
     let is_database = databases.contains_key(name);
-
-    let mutexed = catalog_connection(app_data, &databases).await?;
-    let connection = mutexed.lock().await;
-    if is_database {
-        connection.execute_batch(&format!("DETACH {};", quote_ident(name)))?;
-    } else {
-        let (tabs, _) = derive_catalog(&connection, &databases)?;
+    if !is_database {
+        let held = held_connection(app_data).await?;
+        let (tabs, _) = derive_catalog(held.get(), &databases)?;
         if !tabs.iter().any(|tab| tab.name == name) {
             return Err(eyre::eyre!("nothing named \"{}\" is attached", name));
         }
-        // a view or a table: which one is not worth tracking, so try both
-        let view = format!("DROP VIEW IF EXISTS {};", quote_ident(name));
-        if connection.execute_batch(&view).is_err() {
-            connection.execute_batch(&format!("DROP TABLE IF EXISTS {};", quote_ident(name)))?;
-        }
     }
-    // the caller forgets the input in the session, which is what stops a later
-    // connection from attaching it again
-    Ok(())
+
+    let mut without = databases.clone();
+    without.remove(name);
+    let quoted = quote_ident(name);
+    with_main_write(app_data, &without, |connection| {
+        if is_database {
+            // the read-write handle was opened with `without`, so the database
+            // is already absent from it; detaching matters for the in-memory
+            // case, where this is the connection that has it
+            let _ = connection.execute_batch(&format!("DETACH IF EXISTS {};", quoted));
+            return Ok(());
+        }
+        // a view or a table: which one is not worth tracking, so try both
+        if connection.execute_batch(&format!("DROP VIEW IF EXISTS {};", quoted)).is_err() {
+            connection.execute_batch(&format!("DROP TABLE IF EXISTS {};", quoted))?;
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// Compile table filter patterns: fully anchored regular expressions, so a
@@ -641,14 +752,20 @@ fn any_filter_matches(filters: &[regex::Regex], name: &str) -> bool {
 
 /// The ATTACH statement for a database input (only valid when
 /// `input.is_database()`).
+/// Attached databases are read-only: the query editor is a viewer, and a
+/// stray DELETE typed there must not reach someone's postgres.
 fn attach_statement(input: &Input) -> String {
     let connection_string = input.uri.strip_prefix("sqlite://").unwrap_or(&input.uri);
     let uri = quote_literal(connection_string);
     let name = quote_ident(&input.name);
     match input.db_type() {
-        DbType::Postgres => format!("ATTACH IF NOT EXISTS {} AS {} (TYPE POSTGRES)", uri, name),
-        DbType::Sqlite => format!("ATTACH IF NOT EXISTS {} AS {} (TYPE SQLITE)", uri, name),
-        DbType::DuckDb => format!("ATTACH IF NOT EXISTS {} AS {}", uri, name),
+        DbType::Postgres => {
+            format!("ATTACH IF NOT EXISTS {} AS {} (TYPE POSTGRES, READ_ONLY)", uri, name)
+        }
+        DbType::Sqlite => {
+            format!("ATTACH IF NOT EXISTS {} AS {} (TYPE SQLITE, READ_ONLY)", uri, name)
+        }
+        DbType::DuckDb => format!("ATTACH IF NOT EXISTS {} AS {} (READ_ONLY)", uri, name),
     }
 }
 
@@ -698,7 +815,20 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
         return Err(eyre::eyre!("{} is not a DuckDB database file", db_path));
     }
 
-    let conn = session::open_with_retry(path).map_err(|e| eyre::eyre!("{}", e))?;
+    // Read-only, so this works alongside a running server, which holds the
+    // file read-only itself — two readers do not conflict, and taking a write
+    // lock here would block the server instead. Statements that need to write
+    // fall back below, which succeeds when nothing else holds the file and
+    // fails with duckdb's own read-only message when a server does.
+    let conn = match duckdb::Config::default()
+        .access_mode(duckdb::AccessMode::ReadOnly)
+        .and_then(|config| Connection::open_with_flags(path, config))
+    {
+        Ok(conn) => conn,
+        // a database with a write-ahead log to replay cannot be opened
+        // read-only, and neither can one being written to right now
+        Err(_) => session::open_with_retry(path).map_err(|e| eyre::eyre!("{}", e))?,
+    };
 
     let mut inputs = own_inputs(&conn);
 
@@ -750,33 +880,41 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
         }
     }
 
-    match run_query(sql, &conn, limit) {
-        Ok(table_data) => Ok(table_data),
+    let outcome = match run_query(sql, &conn, limit) {
+        Ok(table_data) => return Ok(table_data),
         Err(prepare_error) => {
             // multi-statement input (a genuine error surfaces identically here)
-            conn.execute_batch(sql).map_err(|_| prepare_error)?;
-            Ok(TableData { headers: vec![], rows: vec![] })
+            match conn.execute_batch(sql) {
+                Ok(()) => return Ok(TableData { headers: vec![], rows: vec![] }),
+                Err(e) => (prepare_error, e.to_string()),
+            }
         }
+    };
+
+    // The connection above is read-only. A statement that needs to write gets
+    // one more go on a writable connection, which works when nothing else
+    // holds the file and fails with duckdb's own message when a server does.
+    if outcome.1.contains("read-only mode") {
+        let writable = session::open_with_retry(path).map_err(|e| eyre::eyre!("{}", e))?;
+        replay_onto_writable(&writable, &inputs);
+        return match run_query(sql, &writable, limit) {
+            Ok(table_data) => Ok(table_data),
+            Err(prepare_error) => {
+                writable.execute_batch(sql).map_err(|_| prepare_error)?;
+                Ok(TableData { headers: vec![], rows: vec![] })
+            }
+        };
+    }
+    Err(outcome.0)
+}
+
+/// Replay a `sqlnow sql` run's attaches onto a second connection.
+fn replay_onto_writable(connection: &Connection, inputs: &[Input]) {
+    for input in inputs.iter().filter(|input| input.is_database()) {
+        let _ = connection.execute_batch(&attach_statement(input));
     }
 }
 
-/// Open a new connection to the main database, replaying the attaches and
-/// settings that do not survive across connections.
-fn fresh_db_connection(app_data: &AppData, databases: &HashMap<String, Input>) -> Connection {
-    let connection = Connection::open(app_data.db.clone().unwrap()).unwrap();
-    // regenerated from what the session records rather than remembered: an
-    // attach added since this server started still takes effect here. The
-    // caller passes them in, having already had to read them itself — reading
-    // the session twice for one request is a whole extra database open.
-    let mut replay = vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()];
-    replay.extend(databases.values().map(attach_statement));
-    for sql in &replay {
-        if let Err(e) = connection.execute_batch(sql) {
-            eprintln!("Failed to replay `{}` on new connection: {}", sql, e);
-        }
-    }
-    connection
-}
 
 #[cfg(test)]
 mod tests {
@@ -1154,20 +1292,14 @@ struct SqlResponse {
 async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest>) -> Result<impl Responder, Error> {
     let sql = post_data.sql.clone();
 
-    let mutexed_connection = if app_data.connection.is_some() {
-        app_data.connection.clone().unwrap()
-    } else if app_data.db.is_some() {
-        Arc::new(Mutex::new(fresh_db_connection(&app_data, &recorded_databases(&app_data))))
-    } else {
-        return Err(ErrorBadRequest("No database connection"));
-    };
-
-    let conn = mutexed_connection.lock().await;
+    let held = held_connection(&app_data)
+        .await
+        .map_err(|e| ErrorInternalServerError(e.to_string()))?;
 
     let table_data = if sql.is_empty() {
         Ok(TableData { headers: vec![], rows: vec![] })
     } else {
-        run_query(&sql.as_str(), &conn, post_data.display_limit.parse().unwrap_or(500))
+        run_query(&sql.as_str(), held.get(), post_data.display_limit.parse().unwrap_or(500))
     };
 
     // every run lands in the session history, failed ones included, so the
@@ -1282,19 +1414,19 @@ async fn output_stream(
     output: OutputFormat,
 ) -> Result<impl Responder, Error> {
 
-    let mutexed_connection = if app_data.connection.is_some() {
-        app_data.connection.clone().unwrap()
-    } else if app_data.db.is_some() {
-        Arc::new(Mutex::new(fresh_db_connection(&app_data, &recorded_databases(&app_data))))
-    } else {
-        return Err(ErrorBadRequest("No database connection"));
-    };
-
+    // the connection is taken inside the stream: the guard has to live as long
+    // as the rows being written, which outlives this function
     let output_stream = stream! {
 
-        let conn = mutexed_connection.lock().await;
+        let held = match held_connection(&app_data).await {
+            Ok(held) => held,
+            Err(e) => {
+                yield Err::<Bytes, Error>(ErrorInternalServerError(e.to_string()));
+                return;
+            }
+        };
 
-        let mut prepared = conn.prepare(&sql).unwrap();
+        let mut prepared = held.get().prepare(&sql).unwrap();
         let mut db_rows = prepared.query([]).unwrap();
 
         let mut headers: Vec<String> = vec![];
@@ -1357,3 +1489,4 @@ async fn output_stream(
         .insert_header(("Content-Type", content_type))
         .streaming(Box::pin(output_stream)))
 }
+

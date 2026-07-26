@@ -167,6 +167,16 @@ attached. **`DELETE` drops the view or table**, so with a main database it
 removes it from that file for good; detaching a *database* input only detaches
 it and leaves the file alone.
 
+**`/query.json` cannot write.** The server holds its main database read-only
+and attaches every other database read-only, so DDL or DML sent to
+`/query.json` — or typed by the user in the editor — comes back as
+`Cannot execute statement of type "CREATE" … read-only mode`. That is
+deliberate: the browser is a viewer. Add data with `POST /api/inputs`, which is
+the one path that escalates to write access. `sqlnow sql` and `sqlnow exec`
+still work while a server runs — `sql` reads the main database alongside it and
+falls back to a writable connection only if a statement needs one, and `exec`
+touches session files, which are never held.
+
 **Live updates**: the UI subscribes to `/api/events`, so queries you add or
 update on a running server appear in the user's browser within about a
 second — including the query they are currently looking at. Updating an open

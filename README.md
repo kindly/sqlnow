@@ -92,6 +92,15 @@ curl -s -X DELETE localhost:8080/api/inputs/more                    # detach
 Detaching drops the view or table, so with a main database it is removed from
 that file; detaching a database input only detaches it.
 
+**The viewer reads; it does not write.** The server holds its main database
+read-only, and attaches every other database read-only too, so SQL typed in the
+query editor cannot change your data — a `CREATE TABLE` or a `DELETE` against
+an attached postgres comes back refused. Data is added through
+`POST /api/inputs`, which is the only path allowed to write. Other processes
+are unaffected: they can read the main database while a session runs, and a
+write from outside (`sqlnow sql`, the duckdb CLI) is noticed and picked up on
+the next request.
+
 ## Sessions
 
 Queries and run history live in a **session database** (`.sqlnow`), which is
