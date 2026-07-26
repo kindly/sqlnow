@@ -8,7 +8,7 @@
 use eyre::Result;
 use std::env;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use libsqlnow::{
@@ -702,8 +702,28 @@ fn print_recent_sessions() -> Result<()> {
 /// is opened exactly as naming that file would be; everything else lives in
 /// the store and is opened by id.
 enum ResumeTarget {
+    /// Held in the store itself, by id.
     Stored(String),
+    /// A session file of its own, opened as such.
     File(PathBuf),
+    /// A main database. Its sidecar holds the session, but opening the sidecar
+    /// alone is not enough: with a main database only the attaches are
+    /// recorded there, because file views and tables live in the database.
+    Database(PathBuf),
+}
+
+/// The database a sidecar belongs to, when there is one.
+///
+/// [`sidecar_path`] appends `.sqlnow` to the database's path, so stripping it
+/// again gives the database back. Used to reopen a session recorded before the
+/// store started remembering the database, and to make sense of a sidecar named
+/// on the command line.
+fn database_beside(sidecar: &Path) -> Option<PathBuf> {
+    let text = sidecar.to_string_lossy();
+    let anchor = PathBuf::from(text.strip_suffix(".sqlnow")?);
+    let is_duckdb = anchor.exists()
+        && sniff_db_type(&anchor.to_string_lossy()) == Some(DbType::DuckDb);
+    is_duckdb.then_some(anchor)
 }
 
 /// Resolve `--resume <value>`: a position in the listing (1 is most recent)
@@ -721,6 +741,7 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
     let target = |session: &StoredSession| match &session.path {
         Some(path) => {
             let path = PathBuf::from(path);
+            let path = database_beside(&path).unwrap_or(path);
             // opening a missing path would silently create an empty session
             // there, which is not what resuming one means
             if !path.exists() {
@@ -734,7 +755,10 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
                     session.id
                 ));
             }
-            Ok(ResumeTarget::File(path))
+            match path.extension().and_then(|ext| ext.to_str()) {
+                Some("sqlnow") => Ok(ResumeTarget::File(path)),
+                _ => Ok(ResumeTarget::Database(path)),
+            }
         }
         None => Ok(ResumeTarget::Stored(session.id.clone())),
     };
@@ -867,6 +891,10 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
                 println!("Resuming session {}", path.display());
                 sidecar_files.insert(0, path.to_string_lossy().into_owned());
             }
+            ResumeTarget::Database(path) => {
+                println!("Resuming session on {}", path.display());
+                db = Some(path.to_string_lossy().into_owned());
+            }
             ResumeTarget::Stored(id) => resume_id = Some(id),
         }
     }
@@ -907,10 +935,14 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     };
 
     // A session in a file of its own is recorded in the store, so `--resume`
-    // lists it alongside the stored ones. The pointer is advisory: the session
-    // itself works whether or not the store can be written.
-    if let (false, Some(path), Some(store)) = (cli.no_register, kept.as_ref(), store_path()) {
-        if let Err(e) = register_session(&store, session.id(), path) {
+    // lists it alongside the stored ones. What is recorded is what has to be
+    // opened to get the session back — the database when there is one, since
+    // its sidecar records only the attaches — rather than where the session's
+    // own rows happen to live. The pointer is advisory: the session itself
+    // works whether or not the store can be written.
+    let reopen = db.clone().map(PathBuf::from).or_else(|| kept.clone());
+    if let (false, Some(path), Some(store)) = (cli.no_register, reopen, store_path()) {
+        if let Err(e) = register_session(&store, session.id(), &path) {
             eprintln!("note: could not add {} to the session list ({})", path.display(), e);
         }
     }
@@ -1231,6 +1263,32 @@ mod tests {
             kept_anchor(Some(&db), &files),
             Some(PathBuf::from("data/plants.duckdb.sqlnow"))
         );
+    }
+
+    #[test]
+    fn a_sidecar_resolves_back_to_its_database() {
+        let dir = std::env::temp_dir().join(format!("sqlnow-beside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // a real duckdb file and the sidecar beside it
+        let db = dir.join("plants.duckdb");
+        libsqlnow::exec_sql(&db, "SELECT 1").ok();
+        let sidecar = dir.join("plants.duckdb.sqlnow");
+        std::fs::write(&sidecar, "").unwrap();
+        // resuming the sidecar has to open the database: with a main database
+        // the sidecar records only attaches, so on its own it has no tables
+        assert_eq!(database_beside(&sidecar), Some(db));
+
+        // a session file that is not a sidecar stays what it is
+        let standalone = dir.join("analysis.sqlnow");
+        std::fs::write(&standalone, "").unwrap();
+        assert_eq!(database_beside(&standalone), None);
+
+        // and neither is anything whose "database" is missing or not duckdb
+        let orphan = dir.join("gone.duckdb.sqlnow");
+        std::fs::write(&orphan, "").unwrap();
+        assert_eq!(database_beside(&orphan), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
