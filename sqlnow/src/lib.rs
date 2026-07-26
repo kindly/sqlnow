@@ -1038,10 +1038,14 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
         tokio::task::spawn_blocking(move || get_app_data(config, session)).await??
     };
 
-    // record inputs only once everything attached successfully. With a main
+    // Record inputs only once everything attached successfully. With a main
     // db, file views/tables are persisted inside the duckdb file itself, so
     // only database attaches need recording; otherwise everything does.
-    if persistent {
+    //
+    // Done even for a session that will not outlive the run, because the
+    // server reads these back to know which inputs are databases — that is
+    // where their --only/--except filters and display names come from.
+    {
         let entries: Vec<(String, Input)> = if db.is_some() {
             views
                 .iter()

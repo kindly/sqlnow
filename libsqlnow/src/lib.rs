@@ -144,32 +144,21 @@ pub struct TableData {
     pub rows: Vec<Vec<String>>,
 }
 
-/// What the server currently knows it can query.
+/// What the server holds for the life of a run.
 ///
-/// Derived from the connection rather than accumulated, so attaching or
-/// detaching an input is "run the SQL, then derive this again". It sits behind
-/// a lock in [`AppData`] because that can happen while the server is running.
-pub struct Catalog {
-    pub tabs: Vec<Tab>,
-    pub sections: Vec<String>,
-    /// ATTACH statements and settings that only live for the lifetime of a
-    /// connection. When `db` is set, requests open fresh connections, so
-    /// these are replayed on each one.
-    pub per_connection_sql: Vec<String>,
-    /// The database inputs by name, kept because their --only/--except filters
-    /// have to be applied again every time the catalog is derived.
-    databases: HashMap<String, Input>,
-}
-
+/// Deliberately almost nothing: the tab list, the attaches to replay and the
+/// browser-state scope are all questions with answers in the database or the
+/// session file, so they are asked per request rather than remembered. What is
+/// left is the in-memory database itself (which nothing can re-derive, since
+/// there is no file behind it), where a main database lives if there is one,
+/// and how to reach the session.
 #[derive(Clone)]
 pub struct AppData {
-    pub config: Config,
     pub connection: Option<Arc<Mutex<Connection>>>,
     pub db: Option<String>,
-    /// Tabs, sections and the replay list, behind a lock: inputs can be
-    /// attached and detached while the server runs.
-    pub catalog: Arc<std::sync::RwLock<Catalog>>,
-    pub scope: Option<String>,
+    /// From --text: how a later input is attached. Startup configuration
+    /// rather than derived state, so it cannot disagree with anything.
+    pub all_text: bool,
     /// The session sidecar store (queries, history, inputs). The mutex
     /// serializes this server's own sidecar operations; the state itself
     /// lives in the sidecar database.
@@ -228,41 +217,29 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         }
     }
 
-    let mut catalog = Catalog {
-        tabs: vec![],
-        sections: vec![],
-        per_connection_sql: vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()],
-        databases: HashMap::new(),
-    };
-
+    let mut databases = HashMap::new();
     for (kind, input) in config
         .views
         .iter()
         .map(|input| ("view", input))
         .chain(config.tables.iter().map(|input| ("table", input)))
     {
-        if let Some(sql) = attach_input(&connection, kind, input, config.all_text, config.drop)? {
-            catalog.per_connection_sql.push(sql);
-            catalog.databases.insert(input.name.clone(), input.clone());
+        if attach_input(&connection, kind, input, config.all_text, config.drop)?.is_some() {
+            databases.insert(input.name.clone(), input.clone());
         }
     }
 
-    let (tabs, sections) = derive_catalog(&connection, &catalog.databases)?;
-    catalog.tabs = tabs;
-    catalog.sections = sections;
-
-    if catalog.tabs.len() == 1 {
+    // derived here only to fail loudly at startup; every later reader derives
+    // it again for itself
+    let (tabs, _) = derive_catalog(&connection, &databases)?;
+    if tabs.len() == 1 {
         return Err(eyre::eyre!("No tables found"));
     }
 
-    let scope = config.scope.clone();
-
     Ok(AppData {
-        config,
         connection: if db.is_none() {Some(Arc::new(Mutex::new(connection)))} else {None},
         db: db,
-        catalog: Arc::new(std::sync::RwLock::new(catalog)),
-        scope,
+        all_text: config.all_text,
         session,
         session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
@@ -540,6 +517,36 @@ fn derive_catalog(
     Ok((tabs, section_list))
 }
 
+/// The database inputs this session records, by name.
+///
+/// Read from the session rather than remembered, so an input added by anything
+/// — this server, an agent through `sqlnow exec`, another process — is picked
+/// up without a restart. Their --only/--except filters travel with them.
+fn recorded_databases(app_data: &AppData) -> HashMap<String, Input> {
+    let session = match app_data.session.lock() {
+        Ok(session) => session,
+        Err(_) => return HashMap::new(),
+    };
+    session
+        .list_inputs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, input)| input.is_database())
+        .map(|(_, input)| (input.name.clone(), input))
+        .collect()
+}
+
+/// The tabs and sections as the database sees them right now.
+///
+/// Two `information_schema` queries, ~10ms with a database attached, which is
+/// far cheaper than the class of bug a remembered copy invites.
+async fn current_catalog(app_data: &AppData) -> Result<(Vec<Tab>, Vec<String>)> {
+    let databases = recorded_databases(app_data);
+    let mutexed = catalog_connection(app_data).await?;
+    let connection = mutexed.lock().await;
+    derive_catalog(&connection, &databases)
+}
+
 /// A connection to run a catalog change on: the shared in-memory one, or a
 /// fresh connection to the main database with the existing attaches replayed.
 async fn catalog_connection(app_data: &AppData) -> Result<Arc<Mutex<Connection>>> {
@@ -559,45 +566,27 @@ async fn catalog_connection(app_data: &AppData) -> Result<Arc<Mutex<Connection>>
 /// table is written into that file and so outlives the run; an attached
 /// database is recorded for replay on later connections instead.
 pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<()> {
-    {
-        let catalog = app_data
-            .catalog
-            .read()
-            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-        if catalog.databases.contains_key(&input.name)
-            || catalog.tabs.iter().any(|tab| tab.name == input.name)
-        {
-            return Err(eyre::eyre!(
-                "\"{}\" is already attached — remove it first to replace it",
-                input.name
-            ));
-        }
+    let databases = recorded_databases(app_data);
+    if databases.contains_key(&input.name) {
+        return Err(eyre::eyre!(
+            "\"{}\" is already attached — remove it first to replace it",
+            input.name
+        ));
     }
 
     let mutexed = catalog_connection(app_data).await?;
     let connection = mutexed.lock().await;
-    let attached = attach_input(&connection, kind, input, app_data.config.all_text, false)?;
+    let (tabs, _) = derive_catalog(&connection, &databases)?;
+    if tabs.iter().any(|tab| tab.name == input.name) {
+        return Err(eyre::eyre!(
+            "\"{}\" is already attached — remove it first to replace it",
+            input.name
+        ));
+    }
 
-    // record the database before deriving, so its --only/--except apply
-    let databases = {
-        let mut catalog = app_data
-            .catalog
-            .write()
-            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-        if let Some(sql) = attached {
-            catalog.per_connection_sql.push(sql);
-            catalog.databases.insert(input.name.clone(), input.clone());
-        }
-        catalog.databases.clone()
-    };
-
-    let (tabs, sections) = derive_catalog(&connection, &databases)?;
-    let mut catalog = app_data
-        .catalog
-        .write()
-        .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-    catalog.tabs = tabs;
-    catalog.sections = sections;
+    attach_input(&connection, kind, input, app_data.all_text, false)?;
+    // nothing to update: the caller records the input in the session, and the
+    // next reader derives the catalog again
     Ok(())
 }
 
@@ -607,55 +596,26 @@ pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<
 /// file for good; an attached database is only detached, and the file it points
 /// at is untouched.
 pub async fn remove_input(app_data: &AppData, name: &str) -> Result<()> {
-    let attach_statement_to_forget = {
-        let catalog = app_data
-            .catalog
-            .read()
-            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-        match catalog.databases.get(name) {
-            Some(input) => Some(attach_statement(input)),
-            None => {
-                if !catalog.tabs.iter().any(|tab| tab.name == name) {
-                    return Err(eyre::eyre!("nothing named \"{}\" is attached", name));
-                }
-                None
-            }
-        }
-    };
+    let databases = recorded_databases(app_data);
+    let is_database = databases.contains_key(name);
 
     let mutexed = catalog_connection(app_data).await?;
     let connection = mutexed.lock().await;
-    match &attach_statement_to_forget {
-        Some(_) => connection.execute_batch(&format!("DETACH {};", quote_ident(name)))?,
+    if is_database {
+        connection.execute_batch(&format!("DETACH {};", quote_ident(name)))?;
+    } else {
+        let (tabs, _) = derive_catalog(&connection, &databases)?;
+        if !tabs.iter().any(|tab| tab.name == name) {
+            return Err(eyre::eyre!("nothing named \"{}\" is attached", name));
+        }
         // a view or a table: which one is not worth tracking, so try both
-        None => {
-            let view = format!("DROP VIEW IF EXISTS {};", quote_ident(name));
-            if connection.execute_batch(&view).is_err() {
-                connection
-                    .execute_batch(&format!("DROP TABLE IF EXISTS {};", quote_ident(name)))?;
-            }
+        let view = format!("DROP VIEW IF EXISTS {};", quote_ident(name));
+        if connection.execute_batch(&view).is_err() {
+            connection.execute_batch(&format!("DROP TABLE IF EXISTS {};", quote_ident(name)))?;
         }
     }
-
-    let databases = {
-        let mut catalog = app_data
-            .catalog
-            .write()
-            .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-        catalog.databases.remove(name);
-        if let Some(sql) = attach_statement_to_forget {
-            catalog.per_connection_sql.retain(|existing| existing != &sql);
-        }
-        catalog.databases.clone()
-    };
-
-    let (tabs, sections) = derive_catalog(&connection, &databases)?;
-    let mut catalog = app_data
-        .catalog
-        .write()
-        .map_err(|_| eyre::eyre!("catalog lock poisoned"))?;
-    catalog.tabs = tabs;
-    catalog.sections = sections;
+    // the caller forgets the input in the session, which is what stops a later
+    // connection from attaching it again
     Ok(())
 }
 
@@ -801,10 +761,10 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
 /// settings that do not survive across connections.
 fn fresh_db_connection(app_data: &AppData) -> Connection {
     let connection = Connection::open(app_data.db.clone().unwrap()).unwrap();
-    let replay = match app_data.catalog.read() {
-        Ok(catalog) => catalog.per_connection_sql.clone(),
-        Err(_) => vec![],
-    };
+    // regenerated from what the session records rather than remembered: an
+    // attach added since this server started still takes effect here
+    let mut replay = vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()];
+    replay.extend(recorded_databases(app_data).values().map(attach_statement));
     for sql in &replay {
         if let Err(e) = connection.execute_batch(sql) {
             eprintln!("Failed to replay `{}` on new connection: {}", sql, e);
@@ -846,29 +806,30 @@ mod tests {
         )
         .unwrap();
 
-        let table_names = |app_data: &AppData| {
-            let catalog = app_data.catalog.read().unwrap();
-            let mut names: Vec<String> = catalog
-                .tabs
+        // asked of the database, never of a remembered copy
+        async fn table_names(app_data: &AppData) -> Vec<String> {
+            let (tabs, _) = current_catalog(app_data).await.unwrap();
+            let mut names: Vec<String> = tabs
                 .iter()
                 .filter(|tab| tab.tab_type == "table")
                 .map(|tab| tab.name.clone())
                 .collect();
             names.sort();
             names
-        };
-        assert_eq!(table_names(&app_data), vec!["plants"]);
+        }
 
         actix_web::rt::System::new().block_on(async {
+            assert_eq!(table_names(&app_data).await, vec!["plants"]);
+
             add_input(&app_data, "view", &view(&second, "units")).await.unwrap();
-            assert_eq!(table_names(&app_data), vec!["plants", "units"]);
+            assert_eq!(table_names(&app_data).await, vec!["plants", "units"]);
 
             // the same name twice is refused rather than silently ignored
             let clash = add_input(&app_data, "view", &view(&second, "units")).await;
             assert!(clash.is_err(), "attaching a name twice should fail");
 
             remove_input(&app_data, "units").await.unwrap();
-            assert_eq!(table_names(&app_data), vec!["plants"]);
+            assert_eq!(table_names(&app_data).await, vec!["plants"]);
 
             assert!(
                 remove_input(&app_data, "units").await.is_err(),
@@ -1109,7 +1070,13 @@ async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
     let mut res = data.contents_utf8().expect("utf8 file").to_string();
     // make the session scope available to the UI before any of its code runs,
     // so browser-stored state (query history) can be keyed per session
-    if let Some(scope) = &app_data.scope {
+    let scope = app_data
+        .session
+        .lock()
+        .ok()
+        .filter(|session| session.is_persistent())
+        .map(|session| session.id().to_string());
+    if let Some(scope) = scope {
         let script = format!("<script>window.SQLNOW_SCOPE = {};</script></head>", json!(scope));
         res = res.replace("</head>", &script);
     }
@@ -1119,16 +1086,15 @@ async fn ui(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
 
 #[post("/tables.json")]
 async fn tables(app_data: web::Data<AppData>) -> Result<impl Responder, Error> {
-    let catalog = app_data
-        .catalog
-        .read()
-        .map_err(|_| ErrorInternalServerError("catalog lock poisoned"))?;
-    let table_tabs = catalog.tabs.iter().filter(
+    let (tabs, sections) = current_catalog(&app_data)
+        .await
+        .map_err(|e| ErrorInternalServerError(e.to_string()))?;
+    let table_tabs = tabs.iter().filter(
         |t| t.tab_type == "table"
     ).collect::<Vec<&Tab>>();
     let output = json!({
         "tables": table_tabs,
-        "sections": catalog.sections.clone()
+        "sections": sections
     });
 
     Ok(HttpResponse::Ok().json(output))
@@ -1150,11 +1116,10 @@ struct TableResponse {
 
 #[post("/table.json")]
 async fn table(app_data: web::Data<AppData>, post_data: web::Form<TableRequest>) -> Result<impl Responder, Error> {
-    let catalog = app_data
-        .catalog
-        .read()
-        .map_err(|_| ErrorInternalServerError("catalog lock poisoned"))?;
-    let table = catalog.tabs.iter().find(|t| t.name == post_data.name).ok_or(ErrorBadRequest("table not found"))?;
+    let (tabs, _) = current_catalog(&app_data)
+        .await
+        .map_err(|e| ErrorInternalServerError(e.to_string()))?;
+    let table = tabs.iter().find(|t| t.name == post_data.name).ok_or(ErrorBadRequest("table not found"))?;
 
     let select_star = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectStar);
     let select_fields = generate_sql(table.schema.as_ref().expect("checked"), SqlType::SelectFields);
