@@ -28,6 +28,20 @@ has a `.sha256` alongside it.
 
 On Arch Linux: `paru -S sqlnow-bin` (or any AUR helper).
 
+### The desktop app
+
+`sqlnow-desktop` is the same server and the same UI in a native window instead
+of a browser tab, with the same arguments and the same session store — either
+version can open a session the other left. On Arch: `paru -S
+sqlnow-desktop-bin`. Elsewhere, take `sqlnow-desktop-<target>.tar.gz` from the
+releases page; it is one executable, but unlike the CLI it links the host's web
+stack, so it needs webkit2gtk-4.1 and GTK 3 installed (an AppImage that carries
+its own is the plan). macOS and Windows builds are not published yet.
+
+Build it yourself with `cargo build --release -p sqlnow-desktop` — it is left
+out of the default workspace members so a plain `cargo build` does not need
+webkit at all.
+
 ### Build from source
 
 ```

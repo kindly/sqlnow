@@ -95,3 +95,75 @@ jobs:
             sqlnow-*.zip*
             sqlnow-*.deb
             sqlnow-*.rpm
+
+  # The desktop shell is built on its own because it links webkit2gtk and GTK:
+  # system packages the portable CLI does not need, which is why it is left out
+  # of the workspace's default members and so out of the job above.
+  #
+  # The artifact is the binary plus its desktop entry and icon — one executable
+  # with the UI and DuckDB inside it, but dynamically linked against the host's
+  # web stack, so it is only useful to a package that can declare those
+  # dependencies (currently the AUR's sqlnow-desktop-bin). An AppImage, which
+  # would carry webkit itself and run on any distribution, is the intended
+  # answer for wider distribution: it needs the tauri CLI and linuxdeploy added
+  # to this job, and replaces the tarball rather than the whole approach.
+  #
+  # Linux only for now. macOS and Windows are perfectly buildable — WKWebView
+  # and WebView2 are already what tauri would use — but nothing here compiles
+  # them, so those paths are untested.
+  desktop:
+    name: desktop ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04 # oldest supported = lowest glibc floor
+          - target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.target }}
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+
+      - name: Build
+        run: cargo build --release --locked -p sqlnow-desktop
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/sqlnow-desktop LICENSE README.md AGENTS.md dist/
+          cp sqlnow-desktop/sqlnow-desktop.desktop dist/
+          # named after the Icon= key, which is what a desktop entry looks up
+          cp sqlnow-desktop/icons/128x128.png dist/sqlnow-desktop.png
+          tar -C dist -czf sqlnow-desktop-${{ matrix.target }}.tar.gz \
+            sqlnow-desktop sqlnow-desktop.desktop sqlnow-desktop.png \
+            LICENSE README.md AGENTS.md
+          shasum -a 256 sqlnow-desktop-${{ matrix.target }}.tar.gz \
+            > sqlnow-desktop-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlnow-desktop-${{ matrix.target }}
+          path: sqlnow-desktop-*.tar.gz*
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sqlnow-desktop-*.tar.gz*
