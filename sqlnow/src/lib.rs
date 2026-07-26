@@ -818,7 +818,7 @@ impl Closer {
             return;
         }
         if let Some((store, reopen)) = &self.registry {
-            let _ = register_session(store, session.id(), reopen);
+            let _ = register_session(store, session.id(), reopen, session.changed_at());
         }
     }
 }
@@ -977,7 +977,7 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     let reopen = db.clone().map(PathBuf::from).or_else(|| kept.clone());
     let mut registry = None;
     if let (false, Some(path), Some(store)) = (cli.no_register, reopen, store_path()) {
-        if let Err(e) = register_session(&store, session.id(), &path) {
+        if let Err(e) = register_session(&store, session.id(), &path, session.changed_at()) {
             eprintln!("note: could not add {} to the session list ({})", path.display(), e);
         }
         registry = Some((store, path));

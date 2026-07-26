@@ -279,20 +279,26 @@ impl Session {
                 return *stamp;
             }
         }
-        let stamp = self
-            .with_conn(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT epoch_us(changed_at)::BIGINT FROM sessions WHERE id = ?",
-                        params![self.id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .ok())
-            })
-            .ok()
-            .flatten();
+        let stamp = self.changed_at();
         *cache = Some((mtime, stamp));
         stamp
+    }
+
+    /// When this session's contents last changed, in microseconds since the
+    /// epoch. Read straight from the database, unlike [`Session::change_stamp`]
+    /// which only looks when the file has moved.
+    pub fn changed_at(&self) -> Option<i64> {
+        self.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT epoch_us(changed_at)::BIGINT FROM sessions WHERE id = ?",
+                    params![self.id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .ok())
+        })
+        .ok()
+        .flatten()
     }
 
     fn with_conn<T>(
@@ -1097,21 +1103,36 @@ pub struct StoredSession {
 
 /// Record a session that lives in its own file, so `--resume` can find it
 /// alongside the ones the store holds itself. The row is a pointer: the
-/// queries and history stay in that file, and only `path` and `last_used` are
-/// kept here.
+/// queries and history stay in that file, and only where it is, when it was
+/// last used and when it last changed are kept here.
 ///
 /// Keyed on the session's own id rather than its path, so moving the file and
 /// opening it again moves the pointer instead of leaving a duplicate behind.
-pub fn register_session(store: &Path, id: &str, path: &Path) -> Result<()> {
+pub fn register_session(
+    store: &Path,
+    id: &str,
+    path: &Path,
+    changed_at: Option<i64>,
+) -> Result<()> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let text = canonical.to_string_lossy().into_owned();
     let conn = Session::open_database(store)?;
+    // the session's own changed_at is copied up, so the row is a truthful
+    // index and not just a correctly ordered one — as fresh as `last_used`,
+    // which is to say as of this moment
     let updated = conn.execute(
-        "UPDATE sessions SET path = ?, last_used = now() WHERE id = ?",
-        params![text, id],
+        "UPDATE sessions
+            SET path = ?, last_used = now(),
+                changed_at = coalesce(make_timestamp(?), changed_at)
+          WHERE id = ?",
+        params![text, changed_at, id],
     )?;
     if updated == 0 {
-        conn.execute("INSERT INTO sessions(id, path) VALUES (?, ?)", params![id, text])?;
+        conn.execute(
+            "INSERT INTO sessions(id, path, changed_at)
+             VALUES (?, ?, coalesce(make_timestamp(?), now()))",
+            params![id, text, changed_at],
+        )?;
     }
     Ok(())
 }
@@ -1445,7 +1466,7 @@ mod tests {
         let session = Session::open(&own_file).unwrap();
         session.upsert_query("kept", "SELECT 1").unwrap();
 
-        register_session(&store, session.id(), &own_file).unwrap();
+        register_session(&store, session.id(), &own_file, session.changed_at()).unwrap();
         let listed = list_sessions(&store).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, session.id());
@@ -1454,13 +1475,33 @@ mod tests {
         // the contents stay in that file, so the store holds none of them
         assert_eq!(listed[0].queries, 0);
 
+        // the store's copy of when it last changed tracks the session itself,
+        // rather than being frozen at whenever the row was first written
+        let registry_changed_at = |store: &std::path::Path| -> i64 {
+            let conn = Connection::open(store).unwrap();
+            conn.query_row("SELECT epoch_us(changed_at)::BIGINT FROM sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+        };
+        let first = registry_changed_at(&store);
+        assert_eq!(Some(first), session.changed_at());
+
+        session.upsert_query("later", "SELECT 2").unwrap();
+        let changed = session.changed_at();
+        assert!(changed > Some(first), "the session itself must have moved on");
+        register_session(&store, session.id(), &own_file, changed).unwrap();
+        assert_eq!(Some(registry_changed_at(&store)), changed);
+
         // registering again after a move updates the pointer in place
         let moved = temp_path("moved.sqlnow");
         std::fs::rename(&own_file, &moved).unwrap();
-        register_session(&store, session.id(), &moved).unwrap();
+        register_session(&store, session.id(), &moved, None).unwrap();
         let listed = list_sessions(&store).unwrap();
         assert_eq!(listed.len(), 1, "a moved session must not leave a duplicate");
         assert!(listed[0].path.as_deref().unwrap().ends_with("moved.sqlnow"));
+        // and passing nothing leaves the stored timestamp alone
+        assert_eq!(Some(registry_changed_at(&store)), changed);
     }
 
     #[test]
