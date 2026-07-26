@@ -63,12 +63,14 @@
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "icons/1024x1024.png"
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "icons/1024x1024.png"
     }
   }
 }
