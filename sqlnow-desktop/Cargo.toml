@@ -1,6 +1,6 @@
 [package]
 name = "sqlnow-desktop"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Desktop shell for sqlnow: the same local server and UI in a native window"
 license = "MIT"

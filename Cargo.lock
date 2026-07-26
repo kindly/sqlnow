@@ -3460,7 +3460,7 @@ dependencies = [
 
 [[package]]
 name = "libsqlnow"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "actix-files",
  "actix-web",
@@ -5879,7 +5879,7 @@ dependencies = [
 
 [[package]]
 name = "sqlnow"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "actix-web",
  "clap",
@@ -5898,7 +5898,7 @@ dependencies = [
 
 [[package]]
 name = "sqlnow-desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "actix-web",
  "eyre",
