@@ -32,11 +32,49 @@ function serverBinary() {
   return path.join(process.resourcesPath, name);
 }
 
-/// Everything the user typed after the executable, for the server to interpret.
+/// Switches that belong to electron or chromium rather than to sqlnow.
+///
+/// The two share one command line, so anything a user passes for the window —
+/// `--no-sandbox` being the common one — would otherwise reach the server and
+/// be rejected as an unknown argument. Everything after a bare `--` is the
+/// server's regardless, which is the escape hatch when this list is wrong.
+const SHELL_SWITCHES = [
+  'no-sandbox',
+  'disable-gpu',
+  'disable-gpu-sandbox',
+  'disable-software-rasterizer',
+  'in-process-gpu',
+  'enable-logging',
+  'enable-features',
+  'disable-features',
+  'ozone-platform',
+  'ozone-platform-hint',
+  'gtk-version',
+  'force-device-scale-factor',
+  'user-data-dir',
+  'remote-debugging-port',
+  'lang',
+  'trace-startup',
+  'inspect',
+  'inspect-brk',
+];
+
+/// Everything the user typed that the server should see.
+///
 /// Electron keeps argv[0] for itself and, unpackaged, argv[1] is the app path.
 function serverArgs() {
-  const args = process.argv.slice(app.isPackaged ? 1 : 2);
-  return args.filter((arg) => arg !== '.' && !arg.startsWith('--inspect'));
+  const argv = process.argv.slice(app.isPackaged ? 1 : 2).filter((arg) => arg !== '.');
+
+  const separator = argv.indexOf('--');
+  if (separator !== -1) {
+    return argv.slice(separator + 1);
+  }
+
+  return argv.filter((arg) => {
+    if (!arg.startsWith('--')) return true;
+    const name = arg.slice(2).split('=')[0];
+    return !SHELL_SWITCHES.includes(name);
+  });
 }
 
 /// Start the server and resolve with the address it bound.

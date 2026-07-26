@@ -24,33 +24,51 @@
     "appId": "io.github.kindly.sqlnow",
     "productName": "sqlnow",
     "artifactName": "sqlnow-desktop-${os}-${arch}.${ext}",
-    "files": ["main.js", "icons/**"],
+    "files": [
+      "main.js",
+      "icons/**"
+    ],
     "extraResources": [
       {
         "from": "../target/release/sqlnow",
         "to": "sqlnow"
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "../README.md",
+        "to": "README.md"
+      },
+      {
+        "from": "../AGENTS.md",
+        "to": "AGENTS.md"
       }
     ],
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Development",
       "icon": "icons",
       "desktop": {
-        "entry": {
-          "Name": "sqlnow",
-          "GenericName": "SQL viewer",
-          "Comment": "Local SQL viewer for files and databases",
-          "Categories": "Development;Database;",
-          "MimeType": "text/csv;application/vnd.apache.parquet;application/x-sqlite3;"
-        }
+        "GenericName": "SQL viewer",
+        "Categories": "Development;Database;",
+        "MimeType": "text/csv;application/vnd.apache.parquet;application/x-sqlite3;",
+        "Keywords": "SQL;DuckDB;CSV;Parquet;query;"
       }
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.developer-tools"
     },
     "win": {
-      "target": ["nsis"]
+      "target": [
+        "nsis"
+      ]
     }
   }
 }
