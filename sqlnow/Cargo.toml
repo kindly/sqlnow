@@ -40,3 +40,5 @@ open = "5.1.2"
 # the integration tests drive the built binary over http; ureq is blocking,
 # which suits a test, and is already in the lockfile
 ureq = { version = "2", default-features = false }
+# multi-table sqlite fixtures for the table filters
+rusqlite = { version = "0.40", features = ["bundled"] }

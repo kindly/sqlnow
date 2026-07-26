@@ -208,3 +208,31 @@ fn resume_reports_what_it_cannot_do() {
         assert!(text.contains(expected), "--resume {} said: {}", argument, text);
     }
 }
+
+#[test]
+fn closing_a_session_puts_it_back_at_the_top_of_the_list() {
+    let space = Workspace::new("last-used");
+    let one = space.csv("one.csv").to_string_lossy().to_string();
+    let two = space.write("two.csv", "name,mw\nUnit 1,50\n").to_string_lossy().to_string();
+
+    // open the older one first and leave it running, so the only thing that can
+    // reorder the list is which of them was closed last
+    let first = space.start(&[&one, "-q", "a=SELECT 1"]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    space.start(&[&two, "-q", "b=SELECT 2"]).stop();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    first.stop();
+
+    // a session you just closed is the one you are most likely to want back
+    let listed = space.run_text(&["--resume"]);
+    let order: Vec<&str> = listed
+        .lines()
+        .filter(|line| line.contains("one.csv") || line.contains("two.csv"))
+        .collect();
+    assert_eq!(order.len(), 2, "expected both sessions listed:\n{}", listed);
+    assert!(order[0].contains("one.csv"), "listed in the wrong order:\n{}", listed);
+
+    // and --resume 1 opens that one
+    let resumed = space.start(&["--resume", "1"]);
+    assert_eq!(resumed.query_names(), ["a"]);
+}

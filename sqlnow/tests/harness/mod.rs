@@ -64,6 +64,20 @@ impl Workspace {
         self.write(name, "name,co2\nPlant A,120\nPlant B,340\n")
     }
 
+    /// A sqlite database with several tables, for the table filters.
+    pub fn sqlite(&self, name: &str, tables: &[&str]) -> PathBuf {
+        let path = self.dir.join(name);
+        let db = rusqlite::Connection::open(&path).expect("sqlite fixture");
+        for table in tables {
+            db.execute_batch(&format!(
+                "CREATE TABLE {0}(name TEXT); INSERT INTO {0} VALUES ('a');",
+                table
+            ))
+            .expect("sqlite fixture");
+        }
+        path
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(SQLNOW);
         command.env("XDG_CONFIG_HOME", self.dir.join("config"));
@@ -223,6 +237,62 @@ impl Server {
             std::thread::sleep(Duration::from_millis(20));
         }
         panic!("never printed {:?}; saw:\n{}", needle, self.printed())
+    }
+
+    /// The body as it came, for the pages that are not json.
+    pub fn get_text(&self, path: &str) -> String {
+        ureq::get(&format!("{}{}", self.url, path))
+            .call()
+            .expect("GET failed")
+            .into_string()
+            .expect("reading the body")
+    }
+
+    pub fn status(&self, path: &str) -> u16 {
+        match ureq::get(&format!("{}{}", self.url, path)).call() {
+            Ok(response) => response.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(e) => panic!("GET failed: {}", e),
+        }
+    }
+
+    /// A streaming export, as the download buttons do it.
+    pub fn export(&self, sql: &str, format: &str) -> String {
+        ureq::post(&format!("{}/outputs", self.url))
+            .send_form(&[("sql", sql), (format, "1")])
+            .expect("export failed")
+            .into_string()
+            .expect("reading the body")
+    }
+
+    /// Watch this session's change stream for a while, counting what it reports.
+    ///
+    /// Returned as a handle so a test can watch two servers at once and see
+    /// which of them was told about a change.
+    pub fn watch_changes(&self, window: Duration) -> std::thread::JoinHandle<usize> {
+        let url = format!("{}/api/events", self.url);
+        std::thread::spawn(move || {
+            let agent = ureq::AgentBuilder::new()
+                .timeout_read(Duration::from_millis(250))
+                .build();
+            let response = match agent.get(&url).call() {
+                Ok(response) => response,
+                Err(_) => return 0,
+            };
+            let mut reader = response.into_reader();
+            let deadline = Instant::now() + window;
+            let mut seen = String::new();
+            let mut buffer = [0u8; 512];
+            while Instant::now() < deadline {
+                match std::io::Read::read(&mut reader, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => seen.push_str(&String::from_utf8_lossy(&buffer[..n])),
+                    // nothing arrived within the read timeout, which is normal
+                    Err(_) => continue,
+                }
+            }
+            seen.matches("data: changed").count()
+        })
     }
 
     pub fn get(&self, path: &str) -> Value {

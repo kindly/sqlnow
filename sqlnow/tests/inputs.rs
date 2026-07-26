@@ -1,0 +1,50 @@
+//! What gets attached, and which of its tables are visible.
+
+mod harness;
+use harness::Workspace;
+
+#[test]
+fn only_and_except_choose_tables_from_a_database() {
+    let space = Workspace::new("filters");
+    let db = space.sqlite("legacy.sqlite", &["units", "owners", "audit_log", "entity_one"]);
+    let uri = db.to_string_lossy().to_string();
+
+    // --only is an anchored regex, so a plain name matches exactly
+    let picked = space.start(&["-v", &uri, "--as", "legacy", "--only", "units", "--only", "entity_.*"]);
+    // an attached database's tables are listed under its name
+    assert_eq!(picked.tables(), ["legacy.entity_one", "legacy.units"]);
+    picked.stop();
+
+    // --except is applied after, and both are bound to the input before them
+    let space = Workspace::new("filters-except");
+    let db = space.sqlite("legacy.sqlite", &["units", "owners", "audit_log"]);
+    let uri = db.to_string_lossy().to_string();
+    let trimmed = space.start(&["-v", &uri, "--as", "legacy", "--except", "audit_log"]);
+    assert_eq!(trimmed.tables(), ["legacy.owners", "legacy.units"]);
+
+    // the filter is recorded with the input, so a resumed session keeps it
+    trimmed.stop();
+    let again = space.start(&["-v", &uri, "--as", "legacy", "--except", "audit_log"]);
+    assert_eq!(again.tables(), ["legacy.owners", "legacy.units"]);
+}
+
+#[test]
+fn json_files_can_be_loaded_as_tables() {
+    let space = Workspace::new("json-inputs");
+    let object = space.write("plants.json", r#"[{"name": "Plant A", "co2": 120}]"#);
+    let lines = space.write("units.jsonl", "{\"name\": \"Unit 1\", \"mw\": 50}\n{\"name\": \"Unit 2\", \"mw\": 70}\n");
+
+    // -t materialises them rather than defining a view, so the reader below is
+    // querying stored data, not the files
+    let server = space.start(&[
+        "loaded.duckdb",
+        "-t",
+        &object.to_string_lossy(),
+        "-t",
+        &lines.to_string_lossy(),
+    ]);
+    assert_eq!(server.tables(), ["plants", "units"]);
+    // json numbers land as doubles, which is duckdb's inference, not ours
+    assert_eq!(server.query("SELECT co2::INT FROM plants")["table_data"]["rows"][0][0], "120");
+    assert_eq!(server.query("SELECT count(*) FROM units")["table_data"]["rows"][0][0], "2");
+}

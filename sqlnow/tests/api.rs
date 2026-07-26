@@ -141,3 +141,26 @@ fn a_query_run_anywhere_lands_in_history() {
     let after = space.exec(&space.store(), "SELECT sql FROM history");
     assert!(after.contains("SELECT 41 + 1"), "{}", after);
 }
+
+#[test]
+fn the_page_is_served_with_the_session_it_belongs_to() {
+    let space = Workspace::new("ui");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+
+    let page = server.get_text("/");
+    assert!(page.contains("<div id=\"root\""), "not the app: {}", &page[..page.len().min(400)]);
+
+    // the id is injected before any of the app's code runs, so its stored state
+    // (query history, open tab) can be kept per session rather than per origin
+    let id = server.get("/api/session")["id"].as_str().unwrap().to_string();
+    assert!(page.contains(&format!("window.SQLNOW_SCOPE = \"{}\"", id)), "no scope in the page");
+
+    // and the assets it asks for are really there, which a broken embed would
+    // not be: the whole UI is compiled into the binary
+    let asset = page
+        .split("src=\"")
+        .find(|part| part.starts_with("/assets/"))
+        .and_then(|part| part.split('"').next())
+        .expect("the page references a script");
+    assert_eq!(server.status(asset), 200, "{} is missing from the binary", asset);
+}
