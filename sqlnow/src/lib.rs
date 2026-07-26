@@ -1483,11 +1483,46 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     Ok(Prepared { app_data, open_query, host, port, closer })
 }
 
+/// Stop when whoever started us is gone.
+///
+/// A desktop shell runs this server as a child process and kills it when its
+/// window closes. That covers a clean quit, but a shell that is killed outright
+/// leaves the server running — still listening, still holding the session, so
+/// the app refuses to reopen it. The shell passes its own pid, and this watches
+/// for it to disappear.
+///
+/// Unix only. Windows has no cheap equivalent, and Electron's own cleanup
+/// covers the ordinary quit there.
+fn watch_parent() {
+    let parent: i32 = match env::var("SQLNOW_PARENT_PID").ok().and_then(|pid| pid.parse().ok()) {
+        Some(pid) if pid > 1 => pid,
+        _ => return,
+    };
+    #[cfg(unix)]
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        // signal 0 asks whether the process is there without touching it
+        if unsafe { process_exists(parent, 0) } != 0 {
+            // Leave the way a Ctrl-C does, so the session is recorded as used:
+            // the exit runs the same handler the shell's SIGTERM would.
+            unsafe { process_exists(std::process::id() as i32, 15) };
+            return;
+        }
+    });
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn process_exists(pid: i32, sig: i32) -> i32;
+}
+
 /// Bind the HTTP server and return it alongside the address it actually got.
 /// Binding happens before the server is awaited so callers can fail loudly on
 /// a taken port instead of announcing a URL that does not answer, and so a
 /// `port` of 0 can be resolved to the real port for the URL.
 pub fn serve(app_data: AppData, host: &str, port: u16) -> Result<(Server, SocketAddr)> {
+    watch_parent();
     let workers: usize = env::var("WORKERS")
         .ok()
         .and_then(|val| val.parse().ok())

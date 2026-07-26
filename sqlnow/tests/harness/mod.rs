@@ -121,8 +121,17 @@ impl Workspace {
     /// Start a server and wait until it is listening. Panics with whatever it
     /// printed if it exits first, which is what a broken launch looks like.
     pub fn start(&self, args: &[&str]) -> Server {
-        let mut child = self
-            .command()
+        self.start_with_env(&[], args)
+    }
+
+    /// The same, with extra environment — for the settings only a parent
+    /// process would pass.
+    pub fn start_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Server {
+        let mut command = self.command();
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .args(args)
             .args(["--port", "0"])
             .stdout(Stdio::piped())
@@ -408,6 +417,24 @@ impl Server {
             .iter()
             .map(|query| query["name"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    /// Wait for it to exit on its own, returning how long that took.
+    pub fn wait_for_exit(mut self, within: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        let deadline = started + within;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    let took = started.elapsed();
+                    std::mem::forget(self);
+                    return Some(took);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        None
     }
 
     /// Stop it the way Ctrl-C does, and wait, so the session is closed properly

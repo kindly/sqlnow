@@ -236,3 +236,31 @@ fn closing_a_session_puts_it_back_at_the_top_of_the_list() {
     let resumed = space.start(&["--resume", "1"]);
     assert_eq!(resumed.query_names(), ["a"]);
 }
+
+#[test]
+fn a_server_stops_when_the_shell_that_started_it_is_killed() {
+    let space = Workspace::new("parent-death");
+    let csv = space.csv("plants.csv");
+
+    // stand in for the desktop shell: a process the server is told to watch
+    let mut shell = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .expect("spawning a stand-in parent");
+    let shell_pid = shell.id().to_string();
+
+    let server = space.start_with_env(
+        &[("SQLNOW_PARENT_PID", &shell_pid)],
+        &[&csv.to_string_lossy()],
+    );
+    assert_eq!(server.tables(), ["plants"]);
+
+    // killed outright, the way a crashing shell goes: nothing gets to run a
+    // cleanup handler, so the server has to notice by itself. Otherwise it
+    // keeps listening, keeps the session open, and the app refuses to reopen it.
+    shell.kill().expect("killing the stand-in parent");
+    let _ = shell.wait();
+
+    let stopped = server.wait_for_exit(std::time::Duration::from_secs(20));
+    assert!(stopped.is_some(), "the server outlived the process it was watching");
+}
