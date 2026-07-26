@@ -542,19 +542,22 @@ fn recorded_databases(app_data: &AppData) -> HashMap<String, Input> {
 /// far cheaper than the class of bug a remembered copy invites.
 async fn current_catalog(app_data: &AppData) -> Result<(Vec<Tab>, Vec<String>)> {
     let databases = recorded_databases(app_data);
-    let mutexed = catalog_connection(app_data).await?;
+    let mutexed = catalog_connection(app_data, &databases).await?;
     let connection = mutexed.lock().await;
     derive_catalog(&connection, &databases)
 }
 
 /// A connection to run a catalog change on: the shared in-memory one, or a
 /// fresh connection to the main database with the existing attaches replayed.
-async fn catalog_connection(app_data: &AppData) -> Result<Arc<Mutex<Connection>>> {
+async fn catalog_connection(
+    app_data: &AppData,
+    databases: &HashMap<String, Input>,
+) -> Result<Arc<Mutex<Connection>>> {
     if let Some(connection) = &app_data.connection {
         return Ok(connection.clone());
     }
     if app_data.db.is_some() {
-        return Ok(Arc::new(Mutex::new(fresh_db_connection(app_data))));
+        return Ok(Arc::new(Mutex::new(fresh_db_connection(app_data, databases))));
     }
     Err(eyre::eyre!("no database connection"))
 }
@@ -574,7 +577,7 @@ pub async fn add_input(app_data: &AppData, kind: &str, input: &Input) -> Result<
         ));
     }
 
-    let mutexed = catalog_connection(app_data).await?;
+    let mutexed = catalog_connection(app_data, &databases).await?;
     let connection = mutexed.lock().await;
     let (tabs, _) = derive_catalog(&connection, &databases)?;
     if tabs.iter().any(|tab| tab.name == input.name) {
@@ -599,7 +602,7 @@ pub async fn remove_input(app_data: &AppData, name: &str) -> Result<()> {
     let databases = recorded_databases(app_data);
     let is_database = databases.contains_key(name);
 
-    let mutexed = catalog_connection(app_data).await?;
+    let mutexed = catalog_connection(app_data, &databases).await?;
     let connection = mutexed.lock().await;
     if is_database {
         connection.execute_batch(&format!("DETACH {};", quote_ident(name)))?;
@@ -759,12 +762,14 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
 
 /// Open a new connection to the main database, replaying the attaches and
 /// settings that do not survive across connections.
-fn fresh_db_connection(app_data: &AppData) -> Connection {
+fn fresh_db_connection(app_data: &AppData, databases: &HashMap<String, Input>) -> Connection {
     let connection = Connection::open(app_data.db.clone().unwrap()).unwrap();
     // regenerated from what the session records rather than remembered: an
-    // attach added since this server started still takes effect here
+    // attach added since this server started still takes effect here. The
+    // caller passes them in, having already had to read them itself — reading
+    // the session twice for one request is a whole extra database open.
     let mut replay = vec!["SET GLOBAL sqlite_all_varchar = true;".to_string()];
-    replay.extend(recorded_databases(app_data).values().map(attach_statement));
+    replay.extend(databases.values().map(attach_statement));
     for sql in &replay {
         if let Err(e) = connection.execute_batch(sql) {
             eprintln!("Failed to replay `{}` on new connection: {}", sql, e);
@@ -1152,7 +1157,7 @@ async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest
     let mutexed_connection = if app_data.connection.is_some() {
         app_data.connection.clone().unwrap()
     } else if app_data.db.is_some() {
-        Arc::new(Mutex::new(fresh_db_connection(&app_data)))
+        Arc::new(Mutex::new(fresh_db_connection(&app_data, &recorded_databases(&app_data))))
     } else {
         return Err(ErrorBadRequest("No database connection"));
     };
@@ -1280,7 +1285,7 @@ async fn output_stream(
     let mutexed_connection = if app_data.connection.is_some() {
         app_data.connection.clone().unwrap()
     } else if app_data.db.is_some() {
-        Arc::new(Mutex::new(fresh_db_connection(&app_data)))
+        Arc::new(Mutex::new(fresh_db_connection(&app_data, &recorded_databases(&app_data))))
     } else {
         return Err(ErrorBadRequest("No database connection"));
     };
