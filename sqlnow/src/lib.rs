@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use libsqlnow::{
-    default_name_and_check, exec_sql, get_app_data, input_into_parts, list_sessions, main_web,
+    default_name_and_check, delete_session, exec_sql, get_app_data, input_into_parts, list_sessions,
+    main_web,
     register_session, session_url, set_session_url,
     query_database,
-    sidecar_path, sniff_db_type, validate_name, AppData, Config, DbType, Input, Session, StoredSession,
+    sidecar_path, sniff_db_type, validate_name, AppData, Config, DbType, Deleted, Input, Session,
+    StoredSession,
     TableData,
 };
 use actix_web::{App, HttpServer, dev::Server, web::Data};
@@ -140,6 +142,22 @@ pub enum Command {
         /// Output format
         #[arg(short, long, value_enum, default_value_t = SqlFormat::Csv)]
         format: SqlFormat,
+    },
+    /// Delete a stored session and everything recorded in it: its saved
+    /// queries, its query history, its recorded inputs and its metadata. The
+    /// data files the session read are never touched, and neither is any other
+    /// session. There is no undo:
+    ///   sqlnow delete 3           (a position in the `sqlnow --resume` listing)
+    ///   sqlnow delete a1b2c3d4    (an id, shortened as far as stays unique)
+    Delete {
+        /// Sessions to delete: positions in the `--resume` listing (1 is the
+        /// most recent) or ids. Repeatable.
+        #[arg(required = true, value_name = "N|ID")]
+        sessions: Vec<String>,
+        /// Delete without asking. Required when there is no terminal to ask
+        /// on, so a script or an agent has to say so explicitly.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -488,6 +506,10 @@ pub fn run_immediate(cli: &Cli) -> Result<bool> {
             run_sql(database, sql, *format, *limit)?;
             Ok(true)
         }
+        Some(Command::Delete { sessions, yes }) => {
+            run_delete(sessions, *yes)?;
+            Ok(true)
+        }
         None => Ok(false),
     }
 }
@@ -769,7 +791,8 @@ fn print_recent_sessions() -> Result<()> {
         );
     }
     println!(
-        "\nResume one with `sqlnow --resume 1`, or by id: `sqlnow --resume {}`",
+        "\nResume one with `sqlnow --resume 1`, or by id: `sqlnow --resume {}`. \
+         Remove one with `sqlnow delete 1`.",
         ids[0]
     );
     Ok(())
@@ -812,9 +835,6 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
             "there are no stored sessions to resume (`sqlnow --resume` lists them)"
         ));
     }
-    if value == "0" {
-        return Err(eyre::eyre!("--resume counts from 1, not 0"));
-    }
     let target = |session: &StoredSession| match &session.path {
         Some(path) => {
             let path = PathBuf::from(path);
@@ -839,32 +859,192 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
         }
         None => Ok(ResumeTarget::Stored(session.id.clone())),
     };
+    target(find_stored(&sessions, value, "--resume")?)
+}
+
+/// A session named on the command line: a position in the listing (1 is the
+/// most recent) or an id, which may be shortened as long as it stays
+/// unambiguous. `context` is how the caller was spelled, so an error can
+/// repeat it back the way it was typed.
+fn find_stored<'a>(
+    sessions: &'a [StoredSession],
+    value: &str,
+    context: &str,
+) -> Result<&'a StoredSession> {
+    if value == "0" {
+        return Err(eyre::eyre!("{} counts from 1, not 0", context));
+    }
     // ids are 16 hex digits, so a short all-digit value is read as a position
     // first — but an id can begin with digits, so a position that does not
     // exist falls through to matching ids rather than failing outright
     if value.len() < 16 {
         if let Ok(position) = value.parse::<usize>() {
             if let Some(session) = position.checked_sub(1).and_then(|index| sessions.get(index)) {
-                return target(session);
+                return Ok(session);
             }
         }
     }
     let matched: Vec<&StoredSession> =
         sessions.iter().filter(|session| session.id.starts_with(value)).collect();
     match matched.as_slice() {
-        [session] => target(session),
+        [session] => Ok(session),
         [] => Err(eyre::eyre!(
-            "--resume {}: no session is at that position ({} stored) and none has an id \
+            "{} {}: no session is at that position ({} stored) and none has an id \
              starting with it (`sqlnow --resume` lists them)",
+            context,
             value,
             sessions.len()
         )),
         several => Err(eyre::eyre!(
-            "--resume {}: {} sessions have ids starting with that, use more of the id",
+            "{} {}: {} sessions have ids starting with that, use more of the id",
+            context,
             value,
             several.len()
         )),
     }
+}
+
+/// Where a session's contents actually live: the store row for a session the
+/// store holds itself, otherwise the file it points at — which is a sidecar
+/// when the row records a main database.
+fn session_file(session: &StoredSession, store: &Path) -> PathBuf {
+    match &session.path {
+        None => store.to_path_buf(),
+        Some(path) => match path.ends_with(".sqlnow") {
+            true => PathBuf::from(path),
+            false => sidecar_path(path),
+        },
+    }
+}
+
+/// `sqlnow delete`: remove stored sessions and everything recorded under them.
+///
+/// Every value is resolved, and every session checked for a server holding it,
+/// before anything is deleted: positions come from the listing, so a half-done
+/// run would leave the remaining arguments pointing at the wrong sessions.
+fn run_delete(values: &[String], yes: bool) -> Result<()> {
+    let store = store_path()
+        .ok_or_else(|| eyre::eyre!("there is no session store to delete from"))?;
+    let sessions = recent_sessions();
+    if sessions.is_empty() {
+        return Err(eyre::eyre!(
+            "there are no stored sessions to delete (`sqlnow --resume` lists them)"
+        ));
+    }
+
+    let mut targets: Vec<StoredSession> = vec![];
+    for value in values {
+        let session = find_stored(&sessions, value, "delete")?;
+        if let Some(url) = live_at(&store, &session.id) {
+            return Err(eyre::eyre!(
+                "session {} is open at {} — close it before deleting it",
+                short_id(&session.id),
+                url
+            ));
+        }
+        // the same session named twice, by position and by id, is not an error
+        if !targets.iter().any(|chosen| chosen.id == session.id) {
+            targets.push(session.clone());
+        }
+    }
+
+    if !yes && !confirm_delete(&targets, &store)? {
+        // saying no is a complete, successful run that did nothing, the way
+        // `rm -i` treats it — not a failure for a script to react to
+        println!("Nothing was deleted.");
+        return Ok(());
+    }
+
+    for session in &targets {
+        let file = session_file(session, &store);
+        let counts = match file == store || file.exists() {
+            true => delete_session(&file, &session.id)?,
+            // the entry points at a file that has gone: there is nothing left
+            // to delete but the pointer
+            false => {
+                println!(
+                    "Session {} pointed at {}, which is gone — removing the listing entry only",
+                    short_id(&session.id),
+                    session_label(session)
+                );
+                Deleted::default()
+            }
+        };
+        // a session in a file of its own is also indexed in the store, and that
+        // row has to go too or --resume keeps offering it
+        if file != store {
+            delete_session(&store, &session.id)?;
+        }
+        println!(
+            "Deleted session {} ({}): {} {}, {} history {}, {} {}",
+            short_id(&session.id),
+            session_label(session),
+            counts.queries,
+            plural(counts.queries, "query", "queries"),
+            counts.history,
+            plural(counts.history, "entry", "entries"),
+            counts.inputs,
+            plural(counts.inputs, "input", "inputs"),
+        );
+        if file != store {
+            println!("  {} is left in place, without that session in it", shorten_home(&file.to_string_lossy()));
+        }
+    }
+    Ok(())
+}
+
+/// Ask before deleting, returning whether the answer was yes. Without a
+/// terminal there is nobody to ask, so `--yes` is required instead of assuming
+/// consent on a script's behalf.
+fn confirm_delete(targets: &[StoredSession], store: &Path) -> Result<bool> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let listed: Vec<String> = targets
+        .iter()
+        .map(|session| format!("  {}  {}", short_id(&session.id), session_label(session)))
+        .collect();
+
+    let counted = match targets.len() {
+        1 => "1 session".to_string(),
+        several => format!("{} sessions", several),
+    };
+
+    if !std::io::stdin().is_terminal() {
+        return Err(eyre::eyre!(
+            "deleting {} would remove its saved queries and history for good; pass --yes to \
+             confirm, since there is no terminal to ask on:\n{}",
+            counted,
+            listed.join("\n")
+        ));
+    }
+
+    println!(
+        "About to delete {} from {}, with the queries and history recorded in {}:",
+        counted,
+        shorten_home(&store.to_string_lossy()),
+        plural(targets.len(), "it", "them")
+    );
+    for line in &listed {
+        println!("{}", line);
+    }
+    print!("This cannot be undone. Delete? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
+fn plural<T>(count: usize, one: T, many: T) -> T {
+    match count {
+        1 => one,
+        _ => many,
+    }
+}
+
+/// The eight characters the listing shows, which is how a session is named in
+/// anything a person reads.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
 }
 
 /// A session that is attached and ready to be served.

@@ -326,6 +326,13 @@ tried. Failed queries are recorded too.
   answers with the session id), so a killed server blocks nothing.
 - `sqlnow --resume` is also how to find a server a user already has open when
   you were not told the port.
+- `sqlnow delete <n|id>...` deletes sessions and everything recorded under
+  them: queries, history, inputs and metadata, from the store and from a
+  session's own file. Data files are never touched, a live session is refused,
+  and every argument is resolved before anything goes. **It needs `--yes` when
+  there is no terminal, which is always the case for you — so it cannot happen
+  by accident, and you must not run it unless the user asked for that session
+  to be deleted.** There is no undo, and the history is usually the work.
 - Query names are the identity — renaming changes the URL. The `open` meta
   key follows renames and is cleared if its query is deleted.
 - Old line-format `.sqlnow` files are auto-upgraded to the database format

@@ -120,8 +120,9 @@ directly — there is no other state. Where a session lives:
    `<config dir>/sqlnow/sessions.sqlnow`, so `~/.config/sqlnow/sessions.sqlnow`
    on Linux — keyed by the set of inputs the run was given, and its id is
    printed on startup. Run the same command again and that session resumes,
-   queries and history included. Nothing is ever deleted: one store holding a
-   hundred sessions is a couple of megabytes. If a resumed session records an
+   queries and history included. Nothing is ever deleted behind your back: one
+   store holding a hundred sessions is a couple of megabytes, and pruning is
+   `sqlnow delete`, asked for explicitly. If a resumed session records an
    input that has since moved or gone, the run stops with an error naming it
    instead of starting up without that table.
 
@@ -159,6 +160,22 @@ listed; older ones are still there and can be resumed by id.
 
 Inspect or edit a session with the built-in runner (no duckdb install
 needed): `sqlnow exec session.sqlnow "SELECT * FROM queries"`.
+
+### Deleting a session
+
+`sqlnow delete 3` (a position from the listing) or `sqlnow delete 64942c` (an
+id) removes that session and everything recorded under it — its saved queries,
+its query history, its recorded inputs and its metadata. Several at once is
+fine: `sqlnow delete 2 4 81b95136`.
+
+Nothing else is touched. The data files the session read are never opened, and
+a session that lives in a file of its own is removed from that file and from
+the listing, leaving the file itself in place. A session with a server on it is
+refused until you close it, and every argument is resolved before anything is
+deleted — so a typo in the third one means none of them go.
+
+It asks first, and there is no undo. Without a terminal to ask on (a script, an
+agent) it refuses unless you pass `--yes`.
 
 ## Querying the database from the command line
 

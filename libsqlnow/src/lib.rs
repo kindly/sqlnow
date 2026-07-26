@@ -4,10 +4,11 @@ mod json;
 mod session;
 
 pub use session::{
-    absolute_uri, default_name_and_check, exec_sql, input_into_parts, list_sessions, local_db_path,
+    absolute_uri, default_name_and_check, delete_session, exec_sql, input_into_parts,
+    list_sessions, local_db_path,
     register_session, session_id_for_key, session_url, set_session_url,
     parse_legacy_sidecar, parse_table_filter, quote_ident, quote_literal, random_id, sidecar_path,
-    validate_name, HistoryEntry, Session, SessionError, StoredQuery, StoredSession,
+    validate_name, Deleted, HistoryEntry, Session, SessionError, StoredQuery, StoredSession,
 };
 
 use duckdb::arrow::array::Array;

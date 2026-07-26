@@ -1150,6 +1150,38 @@ pub fn register_session(
     Ok(())
 }
 
+/// What deleting a session took with it, for the report the command prints.
+#[derive(Default)]
+pub struct Deleted {
+    pub queries: usize,
+    pub history: usize,
+    pub inputs: usize,
+    /// Whether there was a session row here at all. False for a store entry
+    /// whose contents live in a file that has since gone.
+    pub found: bool,
+}
+
+/// Delete one session and everything recorded under it.
+///
+/// Every table is keyed by session id, so this is all of it: the saved
+/// queries, the query history, the recorded inputs, the metadata and the
+/// session row itself. Other sessions in the same database are untouched, and
+/// nothing the session read is looked at, let alone removed.
+pub fn delete_session(path: &Path, id: &str) -> Result<Deleted> {
+    let conn = Session::open_database(path)?;
+    let mut deleted = Deleted::default();
+    // one transaction: a session half deleted would be worse than either
+    // outcome, and would still be listed
+    conn.execute_batch("BEGIN")?;
+    deleted.queries = conn.execute("DELETE FROM queries WHERE session = ?", params![id])?;
+    deleted.history = conn.execute("DELETE FROM history WHERE session = ?", params![id])?;
+    deleted.inputs = conn.execute("DELETE FROM inputs WHERE session = ?", params![id])?;
+    conn.execute("DELETE FROM meta WHERE session = ?", params![id])?;
+    deleted.found = conn.execute("DELETE FROM sessions WHERE id = ?", params![id])? > 0;
+    conn.execute_batch("COMMIT")?;
+    Ok(deleted)
+}
+
 /// Publish where a running server can be reached for this session, or clear it
 /// when the run ends.
 ///
