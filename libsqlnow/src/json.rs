@@ -4,22 +4,22 @@ use libflatterer::{flatten_all, guess_array, Options};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
-use std::str;
 use tempfile::TempDir;
 
-use csv;
 
-fn read_first_1000_bytes(file_path: &str) -> io::Result<String> {
-    let mut file = File::open(file_path)?;
-    let mut buffer = vec![0; 10000];
-    file.read(&mut buffer)?;
-
-    let mut s = str::from_utf8(&buffer).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    while !s.is_char_boundary(s.len()) {
-        s = &s[..s.len() - 1];
-    }
-
-    Ok(s.to_string())
+/// Enough of the start of a file to guess whether it holds one json array or
+/// a stream of objects.
+///
+/// `take` rather than one `read` into a fixed buffer: a short read left the
+/// rest of the buffer as trailing NULs, and a cut at 10 kB lands wherever it
+/// lands — mid-character on a file with any multibyte text near that offset,
+/// which used to fail the whole load with "invalid data". A guess does not
+/// need those last bytes to be perfect, so decode lossily.
+fn read_first_bytes(file_path: &str) -> io::Result<String> {
+    let file = File::open(file_path)?;
+    let mut buffer = Vec::new();
+    file.take(10_000).read_to_end(&mut buffer)?;
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -43,15 +43,11 @@ fn to_duckdb_type(json_type: &str) -> String {
     }
 }
 
-pub fn load_json(file: &str, name: &str, selected_tables: &Vec<String>, drop: bool, connection: &Connection) -> Result<()> {
+pub fn load_json(file: &str, name: &str, selected_tables: &[String], drop: bool, connection: &Connection) -> Result<()> {
 
-    let first_1000_bytes = read_first_1000_bytes(file)?;
-    let (file_type, _) = guess_array(&first_1000_bytes)?;
-    let stream = if file_type == "stream" {
-        true
-    } else {
-        false
-    };
+    let start = read_first_bytes(file)?;
+    let (file_type, _) = guess_array(&start)?;
+    let stream = file_type == "stream";
 
     let path = std::path::PathBuf::from(file);
     let file_stem = path.file_stem().unwrap_or(std::ffi::OsStr::new("")).to_str().unwrap_or("");

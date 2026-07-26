@@ -256,6 +256,22 @@ impl Server {
         }
     }
 
+    /// A streaming export that is expected to fail, with the status it gave.
+    pub fn export_status(&self, sql: &str, format: &str) -> (u16, String) {
+        let response = ureq::post(&format!("{}/outputs", self.url))
+            .send_form(&[("sql", sql), (format, "1")]);
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                (status, response.into_string().unwrap_or_default())
+            }
+            Err(ureq::Error::Status(code, response)) => {
+                (code, response.into_string().unwrap_or_default())
+            }
+            Err(e) => panic!("export request failed: {}", e),
+        }
+    }
+
     /// A streaming export, as the download buttons do it.
     pub fn export(&self, sql: &str, format: &str) -> String {
         ureq::post(&format!("{}/outputs", self.url))

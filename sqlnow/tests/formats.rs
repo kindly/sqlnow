@@ -101,3 +101,31 @@ fn sql_can_start_with_a_comment() {
     let out = space.run_text(&["sql", "scratch.sqlnow", "SELECT 42 AS answer", "-f", "csv"]);
     assert_eq!(out.trim(), "answer\n42");
 }
+
+#[test]
+fn an_export_that_cannot_run_says_so() {
+    let space = Workspace::new("export-errors");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+
+    // this panicked the worker: the client got a closed connection with no
+    // status at all, and the only trace was a backtrace in the server log
+    let (status, body) = server.export_status("SELECT * FROM nope", "csv");
+    assert_eq!(status, 400, "body was {:?}", body);
+    assert!(body.contains("nope"), "the error should name what was missing: {}", body);
+
+    // the server is unharmed and the next export works
+    assert_eq!(server.export("SELECT name FROM plants ORDER BY name", "csv"), "name\nPlant A\nPlant B\n");
+}
+
+#[test]
+fn jsonl_keys_come_out_in_column_order() {
+    let space = Workspace::new("jsonl-order");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+
+    // a hash map gave a different order per row, which makes the output
+    // needlessly unstable for anything reading it line by line
+    let jsonl = server.export("SELECT 1 AS zebra, 2 AS apple, 3 AS mango FROM range(2)", "jsonl");
+    for line in jsonl.lines() {
+        assert_eq!(line, r#"{"zebra":"1","apple":"2","mango":"3"}"#);
+    }
+}

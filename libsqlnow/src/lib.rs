@@ -1522,6 +1522,18 @@ async fn output_stream(
     output: OutputFormat,
 ) -> Result<impl Responder, Error> {
 
+    // Prepare once before the response exists, and throw the statement away.
+    // Once the headers are out an error can only truncate the body — which is
+    // what a bad query used to do, after panicking the worker — so anything
+    // the planner can catch has to be caught here, where it is still an
+    // ordinary HTTP error.
+    {
+        let held = held_connection(&app_data)
+            .await
+            .map_err(|e| ErrorInternalServerError(e.to_string()))?;
+        held.get().prepare(&sql).map_err(|e| ErrorBadRequest(e.to_string()))?;
+    }
+
     // the connection is taken inside the stream: the guard has to live as long
     // as the rows being written, which outlives this function
     let output_stream = stream! {
@@ -1534,14 +1546,28 @@ async fn output_stream(
             }
         };
 
-        let mut prepared = held.get().prepare(&sql).unwrap();
-        let mut db_rows = prepared.query([]).unwrap();
+        let mut prepared = match held.get().prepare(&sql) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                yield Err::<Bytes, Error>(ErrorBadRequest(e.to_string()));
+                return;
+            }
+        };
+        let mut db_rows = match prepared.query([]) {
+            Ok(rows) => rows,
+            Err(e) => {
+                yield Err::<Bytes, Error>(ErrorInternalServerError(e.to_string()));
+                return;
+            }
+        };
 
-        let mut headers: Vec<String> = vec![];
-
-        let statement = db_rows.as_ref().expect("should be able to get rows");
-
-        headers.extend(statement.column_names());
+        let headers: Vec<String> = match db_rows.as_ref() {
+            Some(statement) => statement.column_names(),
+            None => {
+                yield Err::<Bytes, Error>(ErrorInternalServerError("the query returned no result set"));
+                return;
+            }
+        };
 
         match output {
             // a tabular export needs its column names as much as a csv does;
@@ -1557,7 +1583,7 @@ async fn output_stream(
         }
 
         while let Some(row) = db_rows.next().map_err(ErrorInternalServerError)? {
-            let row = process_row(&row, &headers).map_err(ErrorInternalServerError)?;
+            let row = process_row(row, &headers).map_err(ErrorInternalServerError)?;
             let mut buf = Vec::new();
             match output {
                 OutputFormat::CSV => {
@@ -1573,7 +1599,13 @@ async fn output_stream(
                     yield Ok::<Bytes, Error>(Bytes::from(buf));
                 }
                 OutputFormat::JSON => {
-                    let map = headers.iter().zip(row.iter()).collect::<HashMap<_, _>>();
+                    // an ordered map, so the keys come out in column order on
+                    // every row rather than however a hash happened to land
+                    let map: serde_json::Map<String, serde_json::Value> = headers
+                        .iter()
+                        .zip(row.iter())
+                        .map(|(header, value)| (header.clone(), json!(value)))
+                        .collect();
                     serde_json::to_writer(&mut buf, &map).map_err(ErrorInternalServerError)?;
                     yield Ok::<Bytes, Error>(Bytes::from(buf));
                     yield Ok::<Bytes, Error>(Bytes::from("\n"));

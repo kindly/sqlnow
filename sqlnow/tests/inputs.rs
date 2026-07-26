@@ -48,3 +48,21 @@ fn json_files_can_be_loaded_as_tables() {
     assert_eq!(server.query("SELECT co2::INT FROM plants")["table_data"]["rows"][0][0], "120");
     assert_eq!(server.query("SELECT count(*) FROM units")["table_data"]["rows"][0][0], "2");
 }
+
+#[test]
+fn a_json_file_with_multibyte_text_loads() {
+    let space = Workspace::new("json-multibyte");
+    // the shape of a json file is guessed from its first 10 kB, and that cut
+    // used to be decoded strictly: a multibyte character straddling it failed
+    // the whole load with "invalid data"
+    let padding = "é".repeat(6000);
+    let json = format!(
+        "[{{\"name\": \"{}\", \"co2\": 120}}, {{\"name\": \"Plant B\", \"co2\": 340}}]",
+        padding
+    );
+    let path = space.write("wide.json", &json);
+
+    let server = space.start(&["loaded.duckdb", "-t", &path.to_string_lossy()]);
+    assert_eq!(server.tables(), ["wide"]);
+    assert_eq!(server.query("SELECT count(*) FROM wide")["table_data"]["rows"][0][0], "2");
+}
