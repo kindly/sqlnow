@@ -129,6 +129,37 @@ function startServer() {
   });
 }
 
+/// Zoom on the keys a browser uses.
+///
+/// Electron's default menu binds `CommandOrControl+Plus`, and on most layouts
+/// `+` is the shifted `=` — so Ctrl+Shift+= zoomed and plain Ctrl+= did
+/// nothing. Chrome accepts both, and its reset accelerator did not reach us
+/// either, so the keys are handled here instead of left to the menu.
+///
+/// Levels rather than factors: chromium's own step is one level, which is a
+/// factor of 1.2, and level 0 is 100%.
+function wireZoom(window) {
+  const contents = window.webContents;
+  const bounded = (level) => Math.max(-5, Math.min(5, level));
+
+  contents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta)) return;
+
+    // `=` and `+` are the same physical key, shift apart; the numpad sends its
+    // own names on some platforms
+    if (['=', '+', 'Add'].includes(input.key)) {
+      contents.setZoomLevel(bounded(contents.getZoomLevel() + 1));
+      event.preventDefault();
+    } else if (['-', '_', 'Subtract'].includes(input.key)) {
+      contents.setZoomLevel(bounded(contents.getZoomLevel() - 1));
+      event.preventDefault();
+    } else if (input.key === '0') {
+      contents.setZoomLevel(0);
+      event.preventDefault();
+    }
+  });
+}
+
 async function main() {
   await app.whenReady();
 
@@ -158,6 +189,8 @@ async function main() {
   window.setMenuBarVisibility(false);
   window.loadURL(started.url);
 
+  wireZoom(window);
+
   // links to anywhere else belong in the user's browser, not in this window
   window.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -173,6 +206,36 @@ async function main() {
         "fetch('/tables.json', {method: 'POST'}).then(r => r.json()).then(d => d.tables.map(t => t.name).join(','))"
       );
       console.log(`SMOKE url=${window.webContents.getURL()} title=${title} tables=${tables}`);
+      started.child.kill('SIGTERM');
+      app.exit(0);
+    });
+  }
+
+  // A seam for the zoom test: chromium delivers these to the renderer exactly
+  // as a real key press, so before-input-event sees what a user would send.
+  if (process.env.SQLNOW_ZOOM_CHECK) {
+    window.webContents.once('did-finish-load', async () => {
+      const press = (key, modifiers) =>
+        new Promise((done) => {
+          window.webContents.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
+          window.webContents.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
+          setTimeout(done, 120);
+        });
+      const level = () => window.webContents.getZoomLevel().toFixed(2);
+
+      const log = [];
+      for (const [label, key, modifiers] of [
+        ['ctrl+=', '=', ['control']],
+        ['ctrl+= again', '=', ['control']],
+        ['ctrl+shift+=', '=', ['control', 'shift']],
+        ['ctrl+-', '-', ['control']],
+        ['ctrl+0', '0', ['control']],
+        ['plain =', '=', []],
+      ]) {
+        await press(key, modifiers);
+        log.push(`${label} -> ${level()}`);
+      }
+      console.log(`ZOOM ${log.join(' | ')}`);
       started.child.kill('SIGTERM');
       app.exit(0);
     });

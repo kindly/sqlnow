@@ -76,6 +76,17 @@ jobs:
             -q 'peek=SELECT * FROM plants' --open peek | tee smoke.log
           grep -q 'SMOKE .*title=sqlnow tables=plants' smoke.log
 
+      - name: Zoom keys
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+          SQLNOW_ZOOM_CHECK: '1'
+        # ctrl+= and ctrl+0 were both dead when zoom was left to electron's
+        # default menu, which binds the shifted `+` only
+        run: |
+          xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee zoom.log
+          grep -q 'ZOOM ctrl+= -> 1.00 .* ctrl+0 -> 0.00 .* plain = -> 0.00' zoom.log
+
   ui:
     runs-on: ubuntu-22.04
     steps:
