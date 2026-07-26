@@ -87,7 +87,17 @@ fn main() -> Result<()> {
                 // the keys wiring up, which is what wire_shortcuts does
                 .zoom_hotkeys_enabled(true)
                 .build()?;
-            if let Err(e) = wire_shortcuts(&window) {
+            // Match the desktop's own text scaling before anything is drawn.
+            // WebKitGTK renders at devicePixelRatio 1 whatever the screen is,
+            // while a browser reads the same setting and scales — which is why
+            // the canvas grid looked coarse here and fine in a browser tab.
+            let base = desktop_scale();
+            if base != 1.0 {
+                if let Err(e) = window.set_zoom(base) {
+                    eprintln!("note: could not apply the desktop text scale ({})", e);
+                }
+            }
+            if let Err(e) = wire_shortcuts(&window, base) {
                 eprintln!("note: keyboard shortcuts unavailable ({})", e);
             }
             Ok(())
@@ -110,7 +120,7 @@ fn main() -> Result<()> {
 /// Zoom is tracked here rather than read back, because the webview has no
 /// getter for it. It starts at 1.0, which is where the window opens.
 #[cfg(target_os = "linux")]
-fn wire_shortcuts(window: &tauri::WebviewWindow) -> Result<()> {
+fn wire_shortcuts(window: &tauri::WebviewWindow, base: f64) -> Result<()> {
     use gtk::gdk::keys::constants as key;
     use gtk::gdk::ModifierType;
     use gtk::prelude::*;
@@ -121,7 +131,9 @@ fn wire_shortcuts(window: &tauri::WebviewWindow) -> Result<()> {
     const RANGE: (f64, f64) = (0.25, 5.0);
 
     let gtk_window = window.gtk_window().map_err(|e| eyre::eyre!("{}", e))?;
-    let zoom = std::rc::Rc::new(std::cell::Cell::new(1.0f64));
+    // steps compose with the desktop scale, and Ctrl+0 goes back to it rather
+    // than to a 1.0 nobody asked for
+    let zoom = std::rc::Rc::new(std::cell::Cell::new(base));
     let webview = window.clone();
 
     gtk_window.connect_key_press_event(move |_, event| {
@@ -139,7 +151,7 @@ fn wire_shortcuts(window: &tauri::WebviewWindow) -> Result<()> {
             key::minus | key::KP_Subtract if ctrl => {
                 Some((zoom.get() / STEP).clamp(RANGE.0, RANGE.1))
             }
-            key::_0 | key::KP_0 if ctrl => Some(1.0),
+            key::_0 | key::KP_0 if ctrl => Some(base),
             _ => None,
         };
         if let Some(level) = level {
@@ -166,6 +178,66 @@ fn wire_shortcuts(window: &tauri::WebviewWindow) -> Result<()> {
 /// Nothing to wire: WebView2 has its own zoom hotkeys and its own F12, and
 /// macOS is not built yet.
 #[cfg(not(target_os = "linux"))]
-fn wire_shortcuts(_window: &tauri::WebviewWindow) -> Result<()> {
+fn wire_shortcuts(_window: &tauri::WebviewWindow, _base: f64) -> Result<()> {
     Ok(())
+}
+
+/// How much the desktop wants text scaled up, as a zoom factor.
+///
+/// GTK keeps this as an Xft DPI in 1024ths — 132710 is 129.6 DPI, which is
+/// 1.35× the 96 DPI baseline — and every toolkit on the desktop honours it.
+/// WebKitGTK does not apply it to the page: `devicePixelRatio` stays 1 however
+/// dense the screen is, so a canvas renders one bitmap pixel per CSS pixel and
+/// 12px text lands on 12 physical pixels. Chrome reads the same setting and
+/// scales, which is the whole of the difference between the two.
+#[cfg(target_os = "linux")]
+fn desktop_scale() -> f64 {
+    use gtk::traits::GtkSettingsExt;
+
+    match gtk::Settings::default() {
+        Some(settings) => scale_from_xft_dpi(settings.gtk_xft_dpi()),
+        None => 1.0,
+    }
+}
+
+/// GTK's Xft DPI, in 1024ths, as a zoom factor against the 96 DPI baseline.
+///
+/// A scale below 1 is ignored: it would shrink text nobody asked to shrink.
+/// The ceiling is where a mistaken setting would stop being recoverable with
+/// Ctrl+0, which resets to this value rather than to 1.
+#[cfg(target_os = "linux")]
+fn scale_from_xft_dpi(dpi_1024ths: i32) -> f64 {
+    // negative means unset, and every toolkit then assumes 96
+    if dpi_1024ths <= 0 {
+        return 1.0;
+    }
+    ((f64::from(dpi_1024ths) / 1024.0) / 96.0).clamp(1.0, 3.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn desktop_scale() -> f64 {
+    // WebView2 and WKWebView both scale with the system already
+    1.0
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::scale_from_xft_dpi;
+
+    #[test]
+    fn the_desktop_text_scale_is_read_from_gtk() {
+        // 96 DPI is the baseline every toolkit assumes: no scaling
+        assert_eq!(scale_from_xft_dpi(96 * 1024), 1.0);
+        // this machine's 132710 is 129.6 DPI, which is 1.35x
+        assert!((scale_from_xft_dpi(132710) - 1.35).abs() < 0.001);
+        assert_eq!(scale_from_xft_dpi(192 * 1024), 2.0);
+
+        // unset, and a value that would shrink text, both mean "leave it alone"
+        assert_eq!(scale_from_xft_dpi(-1), 1.0);
+        assert_eq!(scale_from_xft_dpi(0), 1.0);
+        assert_eq!(scale_from_xft_dpi(48 * 1024), 1.0);
+
+        // and something absurd stays recoverable
+        assert_eq!(scale_from_xft_dpi(9600 * 1024), 3.0);
+    }
 }

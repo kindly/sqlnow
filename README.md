@@ -34,7 +34,13 @@ On Arch Linux: `paru -S sqlnow-bin` (or any AUR helper).
 of a browser tab, with the same arguments and the same session store — either
 version can open a session the other left. `Ctrl +` / `Ctrl -` / `Ctrl 0` zoom
 the window, and `F12` (or `Ctrl Shift I`, or right-click → Inspect Element)
-opens the web inspector. On Arch: `paru -S
+opens the web inspector.
+
+It starts at your desktop's own text scale (GTK's Xft DPI), because WebKitGTK
+does not apply that itself: without it the page renders at one pixel per CSS
+pixel whatever the screen's density, which on a high-DPI display makes the
+results grid — drawn on a canvas — noticeably coarser than the same page in a
+browser. `Ctrl 0` returns to that scale rather than to 100%. On Arch: `paru -S
 sqlnow-desktop-bin`. Elsewhere, take `sqlnow-desktop-<target>.tar.gz` from the
 releases page; it is one executable, but unlike the CLI it links the host's web
 stack, so it needs webkit2gtk-4.1 and GTK 3 installed (an AppImage that carries
