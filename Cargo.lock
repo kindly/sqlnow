@@ -5891,6 +5891,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing-subscriber",
+ "ureq 2.12.1",
  "url",
 ]
 
@@ -5900,6 +5901,7 @@ version = "0.4.0"
 dependencies = [
  "actix-web",
  "eyre",
+ "rusqlite",
  "sqlnow",
  "tauri",
  "tauri-build",

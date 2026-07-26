@@ -14,3 +14,8 @@ eyre = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+# the startup test needs a sqlite database to attach; rusqlite is already in
+# the lockfile through the loaders
+rusqlite = { version = "0.40", features = ["bundled"] }
