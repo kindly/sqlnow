@@ -17,6 +17,8 @@ async fn main() -> Result<()> {
     let (server, addr) = serve(prepared.app_data, &host, prepared.port.unwrap_or(8080))?;
 
     let base_url = format!("http://{}:{}", host, addr.port());
+    // the port is only known now, so this is where the session becomes findable
+    prepared.closer.mark_live(&base_url);
     println!("Server running on {}", base_url);
 
     let deep_url = query_url(&base_url, prepared.open_query.as_deref());

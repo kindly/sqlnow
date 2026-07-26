@@ -112,6 +112,10 @@ While the server runs, this is the reliable way to add or change queries —
 the UI picks changes up on its next navigation or reload.
 
 ```bash
+# which session this server is serving (also a liveness check)
+curl -s localhost:8080/api/session
+# -> {"id":"81b95136...","open":"top rows","path":"/home/u/data.duckdb.sqlnow"}
+
 # list queries (also returns which one is the session's "open" query)
 curl -s localhost:8080/api/queries
 # -> {"open":"top rows","queries":[{"name":"top rows","sql":"SELECT ..."}]}
@@ -315,6 +319,13 @@ tried. Failed queries are recorded too.
   opens one by position or id and replays its inputs. Use it to find the
   session a user was last in without asking them for the path. A session whose
   file has moved is listed as `(missing)` and refuses to resume.
+- **A session already being served is marked `live`, with its address, and
+  cannot be opened a second time** — launching onto it fails and names the
+  running server instead. That is the one to talk to: use its HTTP API rather
+  than starting your own. Addresses are pinged (`GET /api/session`, which
+  answers with the session id), so a killed server blocks nothing.
+- `sqlnow --resume` is also how to find a server a user already has open when
+  you were not told the port.
 - Query names are the identity — renaming changes the URL. The `open` meta
   key follows renames and is cleared if its query is deleted.
 - Old line-format `.sqlnow` files are auto-upgraded to the database format

@@ -20,6 +20,7 @@ pub fn configure(service_config: &mut ServiceConfig) {
         .service(update_query)
         .service(delete_query)
         .service(list_history)
+        .service(describe_session)
         .service(list_inputs)
         .service(create_input)
         .service(delete_input)
@@ -167,6 +168,26 @@ struct NewInput {
     only: Vec<String>,
     #[serde(default)]
     except: Vec<String>,
+}
+
+/// Which session this server is serving.
+///
+/// The listing pings this to tell a running session from a stale address left
+/// by a killed process: an answer is not enough, it has to be the right id,
+/// because the port may since have been taken by something else entirely.
+#[get("/api/session")]
+async fn describe_session(app_data: web::Data<AppData>) -> HttpResponse {
+    with_session(
+        &app_data,
+        |session| {
+            Ok(serde_json::json!({
+                "id": session.id(),
+                "open": session.open_query()?,
+                "path": session.path().map(|path| path.display().to_string()),
+            }))
+        },
+        |body| HttpResponse::Ok().json(body),
+    )
 }
 
 /// The inputs this session will replay on its next launch.

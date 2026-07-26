@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 /// Storage format written into every session database. Format 1 held exactly
 /// one session per file with no version marker; format 2 adds `format` and
 /// `sessions` and gives every other row a `session` column, so one database
-/// can hold many. Bump only alongside a migration in [`ensure_format`].
-const FORMAT_VERSION: i64 = 2;
+/// can hold many; format 3 adds `sessions.url`, where a running server
+/// publishes its address. Bump only alongside a migration in [`ensure_format`].
+const FORMAT_VERSION: i64 = 3;
 
 const SESSION_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS format(version INTEGER NOT NULL);
@@ -26,7 +27,8 @@ const SESSION_SCHEMA: &str = "
         key TEXT,
         path TEXT,
         last_used TIMESTAMP NOT NULL DEFAULT now(),
-        changed_at TIMESTAMP NOT NULL DEFAULT now()
+        changed_at TIMESTAMP NOT NULL DEFAULT now(),
+        url TEXT
     );
     CREATE TABLE IF NOT EXISTS meta(session TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (session, key));
     CREATE TABLE IF NOT EXISTS queries(session TEXT NOT NULL, pos INTEGER NOT NULL, name TEXT NOT NULL, sql TEXT NOT NULL, PRIMARY KEY (session, name));
@@ -702,6 +704,13 @@ fn ensure_format(conn: &Connection, path: &Path) -> Result<()> {
         None => {
             conn.execute("INSERT INTO format(version) VALUES (?)", params![FORMAT_VERSION])?;
         }
+        Some(2) => {
+            // format 3 only adds a column, so the rows carry over untouched
+            conn.execute_batch(
+                "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS url TEXT;
+                 UPDATE format SET version = 3;",
+            )?;
+        }
         Some(found) if found > FORMAT_VERSION => {
             return Err(eyre::eyre!(
                 "{} was written by a newer sqlnow (session format {}, this build understands {}) \
@@ -1099,6 +1108,10 @@ pub struct StoredSession {
     pub age_seconds: i64,
     pub queries: usize,
     pub inputs: Vec<String>,
+    /// Where a server published itself when it opened this session. Present
+    /// does not mean running: a process that was killed leaves it behind, so
+    /// it has to be pinged before it is believed.
+    pub url: Option<String>,
 }
 
 /// Record a session that lives in its own file, so `--resume` can find it
@@ -1137,6 +1150,38 @@ pub fn register_session(
     Ok(())
 }
 
+/// Publish where a running server can be reached for this session, or clear it
+/// when the run ends.
+///
+/// The row is the only place another process can look, so this is what makes a
+/// running session visible in the listing and what stops a second server from
+/// attaching to it. A killed process leaves a stale address behind, which is
+/// why readers ping before believing it.
+pub fn set_session_url(store: &Path, id: &str, url: Option<&str>) -> Result<()> {
+    let conn = Session::open_database(store)?;
+    conn.execute("UPDATE sessions SET url = ? WHERE id = ?", params![url, id])?;
+    Ok(())
+}
+
+/// The address recorded for a session, if any.
+pub fn session_url(store: &Path, id: &str) -> Option<String> {
+    let conn = Session::open_database(store).ok()?;
+    conn.query_row("SELECT url FROM sessions WHERE id = ?", params![id], |row| row.get(0))
+        .ok()
+        .flatten()
+}
+
+/// The session recorded in `store` for a set of inputs, if it exists yet.
+pub fn session_id_for_key(store: &Path, key: &str) -> Option<String> {
+    let conn = Session::open_database(store).ok()?;
+    conn.query_row(
+        "SELECT id FROM sessions WHERE key = ? ORDER BY last_used DESC LIMIT 1",
+        params![key],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Every session in a store, most recently used first.
 ///
 /// One connection and one query, however many sessions there are: the whole
@@ -1159,7 +1204,8 @@ pub fn list_sessions(store: &Path) -> Result<Vec<StoredSession>> {
         "SELECT s.id, s.key, s.path,
                 epoch(now()::TIMESTAMP - s.last_used)::BIGINT,
                 (SELECT count(*) FROM queries q WHERE q.session = s.id),
-                (SELECT list(i.uri) FROM inputs i WHERE i.session = s.id)
+                (SELECT list(i.uri) FROM inputs i WHERE i.session = s.id),
+                s.url
          FROM sessions s
          ORDER BY s.last_used DESC",
     )?;
@@ -1171,6 +1217,7 @@ pub fn list_sessions(store: &Path) -> Result<Vec<StoredSession>> {
             age_seconds: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
             queries: row.get::<_, i64>(4)? as usize,
             inputs: table_list_from_value(row.get(5)?),
+            url: row.get(6)?,
         })
     })?;
     Ok(rows.filter_map(|row| row.ok()).collect())
@@ -1381,6 +1428,48 @@ mod tests {
         let again = Session::open(&path).unwrap();
         assert_eq!(again.id(), "abc123");
         assert_eq!(again.list_queries().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_format_2_session_gains_the_url_column() {
+        let path = temp_path("v2.sqlnow");
+        {
+            // format 2: everything but sessions.url
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE format(version INTEGER NOT NULL);
+                 INSERT INTO format VALUES (2);
+                 CREATE TABLE sessions(id TEXT PRIMARY KEY, key TEXT, path TEXT,
+                     last_used TIMESTAMP NOT NULL DEFAULT now(),
+                     changed_at TIMESTAMP NOT NULL DEFAULT now());
+                 INSERT INTO sessions(id) VALUES ('keepme');
+                 CREATE TABLE meta(session TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (session, key));
+                 CREATE TABLE queries(session TEXT NOT NULL, pos INTEGER NOT NULL, name TEXT NOT NULL, sql TEXT NOT NULL, PRIMARY KEY (session, name));
+                 INSERT INTO queries VALUES ('keepme', 1, 'kept', 'SELECT 1');
+                 CREATE TABLE history(session TEXT NOT NULL, \"at\" TIMESTAMP NOT NULL DEFAULT now(), sql TEXT NOT NULL);
+                 CREATE TABLE inputs(session TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, uri TEXT NOT NULL, tables TEXT[], except_tables TEXT[]);",
+            )
+            .unwrap();
+        }
+
+        let session = Session::open(&path).unwrap();
+        assert_eq!(session.id(), "keepme", "the session carries over");
+        assert_eq!(session.list_queries().unwrap().len(), 1);
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 =
+            conn.query_row("SELECT max(version) FROM format", [], |row| row.get(0)).unwrap();
+        assert_eq!(version, FORMAT_VERSION);
+        // the new column is there and empty, which is what "not running" means
+        let url: Option<String> =
+            conn.query_row("SELECT url FROM sessions", [], |row| row.get(0)).unwrap();
+        assert_eq!(url, None);
+
+        drop(conn);
+        set_session_url(&path, "keepme", Some("http://127.0.0.1:9999")).unwrap();
+        assert_eq!(session_url(&path, "keepme").as_deref(), Some("http://127.0.0.1:9999"));
+        set_session_url(&path, "keepme", None).unwrap();
+        assert_eq!(session_url(&path, "keepme"), None);
     }
 
     #[test]

@@ -62,6 +62,8 @@ fn main() -> Result<()> {
         .map_err(|_| eyre::eyre!("the sqlnow server thread stopped before it bound a port"))??;
 
     let base_url = format!("http://{}", addr);
+    // the window is about to open on it, so publish where it can be reached
+    closer.mark_live(&base_url);
     let target = sqlnow::query_url(&base_url, open_query.as_deref())
         .unwrap_or_else(|| base_url.clone());
 

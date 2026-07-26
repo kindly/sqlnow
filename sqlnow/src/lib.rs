@@ -7,13 +7,13 @@
 
 use eyre::Result;
 use std::env;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use libsqlnow::{
     default_name_and_check, exec_sql, get_app_data, input_into_parts, list_sessions, main_web,
-    register_session,
+    register_session, session_url, set_session_url,
     query_database,
     sidecar_path, sniff_db_type, validate_name, AppData, Config, DbType, Input, Session, StoredSession,
     TableData,
@@ -572,6 +572,59 @@ fn session_key(views: &[Input], tables: &[Input]) -> String {
     digest(&parts)
 }
 
+/// How long to wait on a session that may not be there any more.
+const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Is a server still serving this session at `url`?
+///
+/// An answer is not enough — a killed process leaves its address behind and
+/// the port may since belong to something else — so the reply has to name the
+/// session we asked about. One plain GET over loopback, which needs no HTTP
+/// client: no TLS, no redirects, no proxies.
+fn ping_session(url: &str, id: &str) -> bool {
+    use std::io::{Read, Write};
+
+    let address = match url.strip_prefix("http://") {
+        Some(address) => address,
+        None => return false,
+    };
+    let resolved = match address.to_socket_addrs() {
+        Ok(mut addresses) => match addresses.next() {
+            Some(address) => address,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    let mut stream = match std::net::TcpStream::connect_timeout(&resolved, PING_TIMEOUT) {
+        Ok(stream) => stream,
+        // refused: nothing is listening, so the address is stale
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(PING_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(PING_TIMEOUT));
+    let request = format!(
+        "GET /api/session HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        address
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut reply = String::new();
+    let _ = stream.take(64 * 1024).read_to_string(&mut reply);
+    reply.contains(id)
+}
+
+/// The address of a server currently serving this session, if there is one.
+/// A stale address is cleared as it is found, so it stops being reported.
+fn live_at(store: &Path, id: &str) -> Option<String> {
+    let url = session_url(store, id)?;
+    if ping_session(&url, id) {
+        return Some(url);
+    }
+    let _ = set_session_url(store, id, None);
+    None
+}
+
 /// The stored sessions, most recently used first — one connection and one
 /// query however many there are. Reading them touches nothing, so a listing
 /// does not disturb the order.
@@ -643,6 +696,17 @@ fn print_recent_sessions() -> Result<()> {
     let ids: Vec<String> =
         shown.iter().map(|session| session.id.chars().take(8).collect()).collect();
     let ages: Vec<String> = shown.iter().map(|session| age(session.age_seconds)).collect();
+    // ping the ones claiming an address, so "live" means live and a killed
+    // server's leftover address is cleared rather than reported
+    let store = store_path();
+    let live: Vec<bool> = shown
+        .iter()
+        .map(|session| match (&session.url, &store) {
+            (Some(_), Some(store)) => live_at(store, &session.id).is_some(),
+            _ => false,
+        })
+        .collect();
+
     // a registered session's queries live in its own file, not here, so the
     // store cannot count them — "-" rather than a misleading 0
     let counts: Vec<String> = shown
@@ -671,18 +735,31 @@ fn print_recent_sessions() -> Result<()> {
     );
 
     println!(
-        "{:>pos_w$}  {:<id_w$}  {:<age_w$}  {:>count_w$}  {}",
-        "#", "id", "used", "queries", "session"
+        "{:>pos_w$}  {:<id_w$}  {:<age_w$}  {:>count_w$}  {:<6}  {}",
+        "#", "id", "used", "queries", "state", "session"
     );
     for (index, session) in shown.iter().enumerate() {
         println!(
-            "{:>pos_w$}  {:<id_w$}  {:<age_w$}  {:>count_w$}  {}",
+            "{:>pos_w$}  {:<id_w$}  {:<age_w$}  {:>count_w$}  {:<6}  {}",
             positions[index],
             ids[index],
             ages[index],
             counts[index],
+            if live[index] { "live" } else { "" },
             session_label(session)
         );
+    }
+    if live.iter().any(|running| *running) {
+        println!();
+        for (index, running) in live.iter().enumerate() {
+            if *running {
+                println!(
+                    "Session {} is open at {}",
+                    ids[index],
+                    shown[index].url.as_deref().unwrap_or("")
+                );
+            }
+        }
     }
     if total > shown.len() {
         println!(
@@ -799,15 +876,29 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
 /// thing in the morning.
 pub struct Closer {
     session: Arc<Mutex<Session>>,
-    /// For a session in a file of its own: the store to refresh, and what its
-    /// row there points at. A session held in the store needs neither, because
-    /// the row being touched is already the one the listing reads.
-    registry: Option<(PathBuf, PathBuf)>,
+    /// The store holding this session's row, where its address is published.
+    store: Option<PathBuf>,
+    /// For a session in a file of its own: what its row in the store points
+    /// at, so the row can be refreshed. A session held in the store needs
+    /// nothing here, because the row being touched is the one the listing
+    /// reads.
+    reopen: Option<PathBuf>,
 }
 
 impl Closer {
     /// Best effort: a session that cannot be touched on the way out is only
     /// mis-sorted in a listing, which is no reason to fail a run that worked.
+    /// Publish where this session is being served, so it shows as live and no
+    /// second server attaches to it.
+    pub fn mark_live(&self, url: &str) {
+        if let (Some(store), Ok(session)) = (&self.store, self.session.lock()) {
+            if let Err(e) = set_session_url(store, session.id(), Some(url)) {
+                eprintln!("note: could not publish the session address ({})", e);
+            }
+        }
+    }
+
+    /// Record the session as just used, and withdraw its address.
     pub fn mark_used(&self) {
         let session = match self.session.lock() {
             Ok(session) => session,
@@ -815,10 +906,12 @@ impl Closer {
         };
         if let Err(e) = session.touch_used() {
             eprintln!("note: could not record the session as used ({})", e);
-            return;
         }
-        if let Some((store, reopen)) = &self.registry {
-            let _ = register_session(store, session.id(), reopen, session.changed_at());
+        if let Some(store) = &self.store {
+            let _ = set_session_url(store, session.id(), None);
+            if let Some(reopen) = &self.reopen {
+                let _ = register_session(store, session.id(), reopen, session.changed_at());
+            }
         }
     }
 }
@@ -975,14 +1068,39 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     // own rows happen to live. The pointer is advisory: the session itself
     // works whether or not the store can be written.
     let reopen = db.clone().map(PathBuf::from).or_else(|| kept.clone());
-    let mut registry = None;
-    if let (false, Some(path), Some(store)) = (cli.no_register, reopen, store_path()) {
-        if let Err(e) = register_session(&store, session.id(), &path, session.changed_at()) {
-            eprintln!("note: could not add {} to the session list ({})", path.display(), e);
+    // a session held in the store already has its row; one in a file of its own
+    // gets a pointer, unless the run asked to stay out of the list
+    let mut closer_store = if session.is_persistent() { store_path() } else { None };
+    let mut closer_reopen = None;
+    match (cli.no_register, reopen) {
+        (false, Some(path)) => {
+            if let Some(store) = &closer_store {
+                if let Err(e) = register_session(store, session.id(), &path, session.changed_at())
+                {
+                    eprintln!("note: could not add {} to the session list ({})", path.display(), e);
+                }
+            }
+            closer_reopen = Some(path);
         }
-        registry = Some((store, path));
+        // opted out, or in a file of its own with nowhere to record it
+        (true, Some(_)) => closer_store = None,
+        _ => {}
     }
 
+
+    // Two servers on one session would write over each other's queries and
+    // history, so a session already being served is refused rather than
+    // joined. A stale address left by a killed process pings dead and is
+    // cleared, so only a genuinely running server blocks anything.
+    if let Some(store) = store_path() {
+        if let Some(url) = live_at(&store, session.id()) {
+            return Err(eyre::eyre!(
+                "session {} is already open at {}\nUse it there, or stop that server first.",
+                session.id().chars().take(8).collect::<String>(),
+                url
+            ));
+        }
+    }
 
     // A resumed session is only usable if everything it recorded is still
     // reachable: quietly dropping an input would leave the session looking
@@ -1101,7 +1219,8 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     };
 
     let session = Arc::new(Mutex::new(session));
-    let closer = Closer { session: session.clone(), registry };
+    let closer =
+        Closer { session: session.clone(), store: closer_store, reopen: closer_reopen };
 
     let app_data = {
         let session = session.clone();

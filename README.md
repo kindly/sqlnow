@@ -135,11 +135,19 @@ one is — its own file if it has one, otherwise the inputs it was created for
 (and `-` for queries when they live in a file the store cannot count):
 
 ```
-#  id        used     queries  session
-1  81b95136  2h ago         3  ~/data/plants.parquet, ~/data/units.csv
-2  7c287423  1d ago         -  ~/work/plants.duckdb.sqlnow
-3  64942c08  3d ago         1  postgresql://host/db
+#  id        used     queries  state   session
+1  81b95136  just now       3  live    ~/data/plants.parquet, ~/data/units.csv
+2  7c287423  1d ago         -          ~/work/plants.duckdb
+3  64942c08  3d ago         1          postgresql://host/db
+
+Session 81b95136 is open at http://127.0.0.1:8080
 ```
+
+A session marked `live` has a server on it right now. Opening a second server
+on the same session is refused — two would write over each other's queries and
+history — and the error tells you where the first one is. The addresses are
+pinged rather than trusted, so a server that was killed outright leaves nothing
+blocking you: the listing finds it dead, clears the address and moves on.
 
 A session whose file has since moved is listed as `(missing)` rather than
 dropped, and resuming it says so instead of quietly starting an empty one.
