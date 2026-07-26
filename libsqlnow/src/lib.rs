@@ -1039,6 +1039,74 @@ mod tests {
     }
 
     #[test]
+    fn a_row_limit_is_pushed_into_the_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        // this query raises as soon as a row past 5000 is computed, and duckdb
+        // works in 2048-row chunks — so it only survives if the limit reached
+        // the plan. Reading rows and stopping client-side would compute all
+        // 20000 of them, which is what made a big table slow.
+        let probe = "SELECT CASE WHEN i <= 5000 THEN i
+                                ELSE error('rows past the limit were computed') END AS i
+                     FROM range(1, 20000) t(i)";
+        let table_data = run_query(probe, &conn, 5).expect("the limit was not pushed down");
+        assert_eq!(table_data.rows.len(), 5);
+        assert!(table_data.truncated);
+
+        // and without a limit the whole thing runs, which is the proof that the
+        // query itself was not quietly changed
+        assert!(run_query(probe, &conn, usize::MAX).is_err());
+
+        // a trailing semicolon or comment must not cost the pushdown: both
+        // would end up inside the parentheses, and the query would run whole.
+        // Only the error tells them apart — the rows come back either way.
+        for tail in [";", ";;", " -- what this does", "\n-- why\n"] {
+            let with_tail = format!("{}{}", probe, tail);
+            assert_eq!(
+                run_query(&with_tail, &conn, 5).expect(tail).rows.len(),
+                5,
+                "the limit stopped being pushed down with {:?} on the end",
+                tail
+            );
+        }
+    }
+
+    #[test]
+    fn pushing_the_limit_down_does_not_change_the_answer() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // a subquery wrap would rename the second column to id_1; the
+        // parenthesised form keeps what the user asked for
+        let table_data = run_query("SELECT 1 AS id, 2 AS id", &conn, 10).unwrap();
+        assert_eq!(table_data.headers, ["id", "id"]);
+
+        // an inner ORDER BY still decides which rows come back
+        let ordered = run_query("SELECT i FROM range(1, 100) t(i) ORDER BY i DESC", &conn, 3).unwrap();
+        assert_eq!(ordered.rows, [["99"], ["98"], ["97"]]);
+
+        // a query that carries its own LIMIT cannot be wrapped (duckdb's parser
+        // refuses it) and runs as written — it is already bounded anyway
+        let inner = run_query("SELECT i FROM range(1, 100) t(i) LIMIT 2", &conn, 50).unwrap();
+        assert_eq!(inner.rows, [["1"], ["2"]]);
+        assert!(!inner.truncated);
+
+        // trailing semicolons and comments survive the wrapping
+        assert_eq!(run_query("SELECT 1 AS a;", &conn, 5).unwrap().rows, [["1"]]);
+        assert_eq!(run_query("SELECT 1 AS a -- why", &conn, 5).unwrap().rows, [["1"]]);
+    }
+
+    #[test]
+    fn a_statement_that_writes_runs_exactly_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(a INT);").unwrap();
+
+        // the wrap does not parse for DML, so it falls back to the original —
+        // and the fallback re-prepares, which must never re-execute
+        run_query("INSERT INTO t VALUES (1)", &conn, 500).unwrap();
+        let count = run_query("SELECT count(*) FROM t", &conn, 500).unwrap();
+        assert_eq!(count.rows, [["1"]], "the insert ran more than once");
+    }
+
+    #[test]
     fn containers_render_one_row_at_a_time() {
         let conn = Connection::open_in_memory().unwrap();
         // every one of these arrives as an arrow array plus a row index, and
@@ -1277,11 +1345,48 @@ fn format_timestamp(unit: duckdb::types::TimeUnit, value: i64) -> String {
     format!("{} {}", format_date(days), format_time_micros(time_of_day))
 }
 
+/// `sql` with a row limit the database can plan for, or `None` when there is
+/// nothing to add.
+///
+/// Parenthesised — `(<sql>) LIMIT n` — rather than `SELECT * FROM (<sql>)`,
+/// because a subquery projects: it renames duplicate column names (`id, id`
+/// becomes `id, id_1`), and an optimisation must not change what the caller
+/// sees. The parenthesised form keeps the names, an inner `ORDER BY`, and any
+/// CTE the query defines.
+///
+/// One row past the limit is asked for, which is how truncation is detected.
+fn limited_sql(sql: &str, display_limit: usize) -> Option<String> {
+    let probe = display_limit.checked_add(1)?;
+    // a trailing semicolon would end the statement inside the parentheses
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // the parenthesis goes on its own line: the query may end in a -- comment
+    Some(format!("(\n{}\n) LIMIT {}", trimmed, probe))
+}
+
 fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<TableData> {
     let mut headers: Vec<String> = vec![];
     let mut rows: Vec<Vec<String>> = vec![];
 
-    let mut prepared = conn.prepare(sql)?;
+    // Ask the database for the limit rather than reading rows until we have
+    // enough. duckdb's row API materialises the whole result before the first
+    // row arrives, so 500 rows of a 20M-row table cost 0.3s and a gigabyte of
+    // memory; as a LIMIT inside the query the plan stops early and it is 0.04s
+    // and 46MB. With an ORDER BY it is the difference between a full sort and a
+    // top-N: 1.4s against 0.05s.
+    let mut prepared = match limited_sql(sql, display_limit) {
+        // Anything the parser will not take wrapped — several statements, DDL,
+        // a query that already carries its own LIMIT — runs exactly as it was.
+        // That costs nothing worth having: a query with a LIMIT is already
+        // bounded by it, which is the case this exists to fix.
+        Some(limited) => match conn.prepare(&limited) {
+            Ok(prepared) => prepared,
+            Err(_) => conn.prepare(sql)?,
+        },
+        None => conn.prepare(sql)?,
+    };
 
     let mut db_rows = prepared.query([])?;
 

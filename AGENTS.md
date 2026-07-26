@@ -253,6 +253,12 @@ unless you look:
 A count is never reported, only whether there was more: proving it takes one
 extra row, while counting would take a second pass over the whole table.
 
+The limit is given to the database, not applied to the rows afterwards, so
+asking for 500 rows of a huge table is cheap — 500 of 20M costs about 20ms
+rather than the third of a second and gigabyte of memory it takes to build
+the whole result first. A query that already carries its own `LIMIT` keeps
+it and is left alone.
+
 ## 3. Querying the database: `sqlnow sql`
 
 For database work outside the browser — checking what a session produced,
