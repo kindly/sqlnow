@@ -59,6 +59,45 @@ SegmentedControl.propTypes = {
   onChange: PropTypes.func,
 };
 
+// Where this session is and what it is: the address to hand to an agent or a
+// second tab, and the files behind what is on screen. Fetched when the panel
+// opens rather than on every page load, since it is only ever read here.
+function SessionInfo() {
+  const [info, setInfo] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(location.origin + "/api/session")
+      .then((response) => response.json())
+      .then((body) => { if (!cancelled) setInfo(body); })
+      .catch(() => { if (!cancelled) setInfo({}); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const rows = [
+    ["serving at", location.host],
+    ["database", info?.db],
+    ["session file", info?.path],
+    ["session id", info?.id],
+  ].filter(([, value]) => value);
+
+  return (
+    <div className="border-t border-edge pt-3">
+      <div className="font-mono text-[10px] font-medium uppercase tracking-[0.14em] text-dim">
+        Session
+      </div>
+      <dl className="mt-1 space-y-1.5">
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <dt className="font-mono text-[10px] text-dim">{label}</dt>
+            <dd className="select-all break-all font-mono text-[11px] text-muted">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 function Settings({ theme, setTheme, vimEnabled, setVimEnabled }) {
   const [open, setOpen] = useState(false);
   const panelRef = useRef(null);
@@ -96,7 +135,7 @@ function Settings({ theme, setTheme, vimEnabled, setVimEnabled }) {
         <GearIcon />
       </button>
       {open &&
-        <div className="absolute right-0 top-full z-50 mt-1 flex w-48 flex-col gap-3 rounded border border-edge bg-surface p-3 shadow-lg">
+        <div className="absolute left-0 top-full z-50 mt-1 flex w-72 flex-col gap-3 rounded border border-edge bg-surface p-3 shadow-lg">
           <SegmentedControl
             label="Theme"
             value={theme}
@@ -115,6 +154,7 @@ function Settings({ theme, setTheme, vimEnabled, setVimEnabled }) {
               { value: false, label: "Off" },
             ]}
           />
+          <SessionInfo />
         </div>
       }
     </div>

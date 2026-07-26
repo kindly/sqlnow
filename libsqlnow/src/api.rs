@@ -184,6 +184,7 @@ async fn describe_session(app_data: web::Data<AppData>) -> HttpResponse {
                 "id": session.id(),
                 "open": session.open_query()?,
                 "path": session.path().map(|path| path.display().to_string()),
+                "db": app_data.db,
             }))
         },
         |body| HttpResponse::Ok().json(body),
