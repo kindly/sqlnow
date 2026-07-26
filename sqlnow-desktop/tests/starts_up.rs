@@ -68,3 +68,32 @@ fn it_serves_a_session_with_a_sqlite_database_attached() {
     let url = ready.expect("the desktop shell never reported an address");
     assert!(url.starts_with("http://"), "reported {:?}", url);
 }
+
+/// The published binary keeps its inspector.
+///
+/// tauri and wry both gate the inspector on `debug_assertions` *or* the
+/// `devtools` feature, and on GTK that cfg is what decides whether webkit's
+/// developer extras are switched on at all. Without the feature a debug build
+/// still has devtools and a release build silently has none — which is exactly
+/// how the shipped 0.4.1 came to have no way to inspect anything.
+///
+/// So the invariant lives in Cargo.toml, and that is what this reads: a test
+/// running under `cargo test` is a debug build, where the working inspector
+/// proves nothing about the release one.
+#[test]
+fn the_devtools_feature_is_kept_for_release_builds() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("our own Cargo.toml");
+    let tauri = manifest
+        .lines()
+        .find(|line| line.starts_with("tauri = "))
+        .expect("a tauri dependency line");
+    assert!(
+        tauri.contains("\"devtools\""),
+        "the tauri dependency dropped the devtools feature, so a release build \
+         would ship without an inspector: {}",
+        tauri
+    );
+}
