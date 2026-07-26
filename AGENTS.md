@@ -192,16 +192,66 @@ Query names are identities: unique, case-sensitive, no `/`, max 100 chars.
 Percent-encode them in URLs. The UI deep link for a query is
 `/queries/<percent-encoded name>`.
 
-To run SQL programmatically and get results (same endpoint the UI uses —
-form-encoded, not JSON):
+### Getting results: which route to use
+
+Three routes run SQL, and the choice is not about speed — a request takes
+about 4ms and a `sqlnow sql` process about 30ms, both noise next to your own
+round trip. Choose on what each one can do:
+
+| | writes | lands in history | row limit | errors |
+|---|---|---|---|---|
+| `POST /outputs` | no | no | `limit=N` (optional) | 400 with the message |
+| `POST /query.json` | no | **yes**, and nudges the UI | `display_limit`, **500 by default** | 200 with `error` in the body |
+| `sqlnow sql` | **yes** | no | `--limit N` (optional) | non-zero exit, message on stderr |
+
+The rules that follow from that:
+
+1. **Server running?** Use HTTP: you share the user's session and its
+   attaches, and never contend for the file lock. **No server?** Use
+   `sqlnow sql`.
+2. **Writing anything** — `CREATE TABLE`, `INSERT`, `COPY` — only
+   `sqlnow sql` can. The server's connection is read-only on purpose; the
+   one exception is attaching data, which is `POST /api/inputs`.
+3. **Reading for yourself** — `POST /outputs` with `csv=1`. It is the
+   cheapest output there is and it stays out of the user's history.
+4. **Reading for the user** — `POST /query.json`, *because* it records the
+   query and pokes the UI. That is how they retrace what you did.
+
+Formats, measured on the same 200-row × 3-column result: csv and tab 3.7 kB,
+`query.json` 5.4 kB, the box table 7.5 kB, json and jsonl 8.9 kB. **Prefer
+csv.** Repeating keys on every row costs more than any framing, which is why
+`query.json`'s `{headers, rows}` shape beats jsonl; the box table is for
+humans only.
 
 ```bash
+# form-encoded, not JSON — the same endpoint the UI uses
 curl -s -d 'sql=SELECT count(*) FROM data' -d 'display_limit=500' localhost:8080/query.json
-# -> {"error":null,"table_data":{"headers":[...],"rows":[[...]]}}   (runs land in history)
+# -> {"error":null,"limit":500,"table_data":{"headers":[...],"rows":[[...]],"truncated":false}}
 
-# streaming exports (form-encoded; the field name picks the format: csv | tab | jsonl)
+# exports: the field name picks the format (csv | tab | jsonl)
 curl -s -d 'sql=SELECT * FROM data' -d 'csv=1' localhost:8080/outputs > out.csv
+
+# with a limit, the reply says exactly what you got
+curl -si -d 'sql=SELECT * FROM data' -d 'csv=1' -d 'limit=1000' localhost:8080/outputs
+# -> X-Sqlnow-Rows: 1000
+#    X-Sqlnow-Truncated: true
 ```
+
+**Always check for truncation.** A result of exactly N rows is either the
+whole answer or the first page of a million, and the difference is invisible
+unless you look:
+
+- `query.json` — `table_data.truncated`, with the limit that produced it in
+  `limit`. It defaults to **500 rows** even when you do not ask for a limit.
+- `/outputs` with `limit=N` — `X-Sqlnow-Truncated` and `X-Sqlnow-Rows`
+  headers. The body is buffered in this mode (bounded by your limit) so the
+  headers can be exact; without `limit` it streams the whole result and sends
+  no such headers, because by then there is nothing left to say.
+- `sqlnow sql --limit N` — `(N rows, truncated — there are more)` in the box
+  footer, or a note on **stderr** for csv/json/jsonl so stdout stays parseable.
+
+A count is never reported, only whether there was more: proving it takes one
+extra row, while counting would take a second pass over the whole table.
 
 ## 3. Querying the database: `sqlnow sql`
 
@@ -339,6 +389,9 @@ tried. Failed queries are recorded too.
   to be deleted.** There is no undo, and the history is usually the work.
 - Query names are the identity — renaming changes the URL. The `open` meta
   key follows renames and is cleared if its query is deleted.
+- Results are capped: `/query.json` at 500 rows unless told otherwise. Never
+  conclude anything from a row count without checking `truncated` (or the
+  `X-Sqlnow-Truncated` header, or the CLI's note on stderr).
 - Old line-format `.sqlnow` files are auto-upgraded to the database format
   the first time they are used.
 - The server has no authentication and its SQL can read/write host files.

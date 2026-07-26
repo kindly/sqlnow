@@ -256,11 +256,35 @@ impl Server {
         }
     }
 
+    /// An export with a row limit: the body plus the headers describing it.
+    pub fn export_limited(&self, sql: &str, format: &str, limit: usize) -> (String, String, String) {
+        let response = ureq::post(&format!("{}/outputs", self.url))
+            .send_form(&[("sql", sql), (format, "1"), ("limit", &limit.to_string())])
+            .expect("limited export failed");
+        let rows = response.header("X-Sqlnow-Rows").unwrap_or_default().to_string();
+        let truncated = response.header("X-Sqlnow-Truncated").unwrap_or_default().to_string();
+        (response.into_string().expect("reading the body"), rows, truncated)
+    }
+
     /// A streaming export that is expected to fail, with the status it gave.
     pub fn export_status(&self, sql: &str, format: &str) -> (u16, String) {
         let response = ureq::post(&format!("{}/outputs", self.url))
             .send_form(&[("sql", sql), (format, "1")]);
         match response {
+            Ok(response) => {
+                let status = response.status();
+                (status, response.into_string().unwrap_or_default())
+            }
+            Err(ureq::Error::Status(code, response)) => {
+                (code, response.into_string().unwrap_or_default())
+            }
+            Err(e) => panic!("export request failed: {}", e),
+        }
+    }
+
+    /// The headers of a request that is expected to be refused.
+    pub fn export_form_status(&self, fields: &[(&str, &str)]) -> (u16, String) {
+        match ureq::post(&format!("{}/outputs", self.url)).send_form(fields) {
             Ok(response) => {
                 let status = response.status();
                 (status, response.into_string().unwrap_or_default())
@@ -337,6 +361,16 @@ impl Server {
             Err(ureq::Error::Status(code, _)) => code,
             Err(e) => panic!("DELETE failed: {}", e),
         }
+    }
+
+    /// Run SQL with a row limit, the way the editor's limit box does.
+    pub fn query_with_limit(&self, sql: &str, limit: usize) -> Value {
+        let body = ureq::post(&format!("{}/query.json", self.url))
+            .send_form(&[("sql", sql), ("display_limit", &limit.to_string())])
+            .expect("query failed")
+            .into_string()
+            .expect("reading the body");
+        serde_json::from_str(&body).expect("query.json returns json")
     }
 
     /// Run SQL the way the query editor does.

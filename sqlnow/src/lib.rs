@@ -436,12 +436,27 @@ fn print_box(table: &TableData) {
     }
     line("└", "┴", "┘");
     let count = table.rows.len();
-    println!("({} {})", count, if count == 1 { "row" } else { "rows" });
+    println!(
+        "({} {}{})",
+        count,
+        if count == 1 { "row" } else { "rows" },
+        if table.truncated { ", truncated — there are more" } else { "" }
+    );
 }
 
 fn print_table(table: &TableData, format: SqlFormat) -> Result<()> {
     if table.headers.is_empty() {
         return Ok(());
+    }
+    // the box footer says it inline; every other format is meant to be parsed,
+    // so the warning goes to stderr rather than into the data
+    if table.truncated && !matches!(format, SqlFormat::Box) {
+        let count = table.rows.len();
+        eprintln!(
+            "note: stopped at {} {} — there are more, raise or drop --limit for the rest",
+            count,
+            if count == 1 { "row" } else { "rows" }
+        );
     }
     match format {
         SqlFormat::Box => print_box(table),

@@ -222,7 +222,11 @@ localStorage by older versions are not migrated.
 `PORT`/`HOST` env vars as fallbacks; `WORKERS` env sets worker count
 (default 1). The UI talks to a JSON API (`/api/queries`, `/api/history`)
 documented in [AGENTS.md](AGENTS.md); exports stream from `POST /outputs`
-as CSV/TSV/JSONL.
+as CSV/TSV/JSONL, or come back with `X-Sqlnow-Rows` and
+`X-Sqlnow-Truncated` headers if you pass a `limit`. Results from
+`POST /query.json` carry the limit that was applied and a `truncated` flag,
+so a caller can tell a complete answer from a first page — AGENTS.md has a
+table of which route to use for what.
 
 ## Security
 

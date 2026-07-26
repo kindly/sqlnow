@@ -139,10 +139,14 @@ pub struct TableMeta {
     fields: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct TableData {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    /// Whether a row limit cut this short. Without it, a caller cannot tell
+    /// 500 rows of 500 from 500 rows of nine million, which is the difference
+    /// between an answer and a wrong answer.
+    pub truncated: bool,
 }
 
 /// What the server holds for the life of a run.
@@ -886,7 +890,7 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
         Err(prepare_error) => {
             // multi-statement input (a genuine error surfaces identically here)
             match conn.execute_batch(sql) {
-                Ok(()) => return Ok(TableData { headers: vec![], rows: vec![] }),
+                Ok(()) => return Ok(TableData { headers: vec![], rows: vec![], truncated: false }),
                 Err(e) => (prepare_error, e.to_string()),
             }
         }
@@ -902,7 +906,7 @@ pub fn query_database(db_path: &str, sql: &str, limit: usize) -> Result<TableDat
             Ok(table_data) => Ok(table_data),
             Err(prepare_error) => {
                 writable.execute_batch(sql).map_err(|_| prepare_error)?;
-                Ok(TableData { headers: vec![], rows: vec![] })
+                Ok(TableData { headers: vec![], rows: vec![], truncated: false })
             }
         };
     }
@@ -1285,17 +1289,18 @@ fn run_query(sql: &str, conn: &Connection, display_limit: usize) -> Result<Table
 
     headers.extend(statement.column_names());
 
-    let mut count: usize = 0;
-
+    // fetch one row past the limit: getting it is what proves there was more,
+    // and it costs one row rather than a second counting query
+    let mut truncated = false;
     while let Some(row) = db_rows.next()? {
-        rows.push(process_row(&row, &headers)?);
-        count += 1;
-        if count >= display_limit {
+        if rows.len() == display_limit {
+            truncated = true;
             break;
         }
+        rows.push(process_row(row, &headers)?);
     }
 
-    Ok(TableData { headers, rows: rows })
+    Ok(TableData { headers, rows, truncated })
 }
 
 #[get("/assets/{filename:.*}")]
@@ -1393,6 +1398,9 @@ struct SqlRequest {
 #[derive(Debug, Clone, Serialize)]
 struct SqlResponse {
     error: Option<String>,
+    /// The row limit that was applied, so a caller reading `truncated` can see
+    /// what to raise to get the rest.
+    limit: usize,
     table_data: TableData,
 }
 
@@ -1404,10 +1412,11 @@ async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest
         .await
         .map_err(|e| ErrorInternalServerError(e.to_string()))?;
 
+    let limit: usize = post_data.display_limit.parse().unwrap_or(500);
     let table_data = if sql.is_empty() {
-        Ok(TableData { headers: vec![], rows: vec![] })
+        Ok(TableData::default())
     } else {
-        run_query(&sql.as_str(), held.get(), post_data.display_limit.parse().unwrap_or(500))
+        run_query(sql.as_str(), held.get(), limit)
     };
 
     // every run lands in the session history, failed ones included, so the
@@ -1425,13 +1434,15 @@ async fn sql_query(app_data: web::Data<AppData>, post_data: web::Form<SqlRequest
         Ok(table_data) => {
             Ok(HttpResponse::Ok().json(SqlResponse {
                 error: None,
+                limit,
                 table_data,
             }))
         }
         Err(e) => {
             Ok(HttpResponse::Ok().json(SqlResponse {
                 error: Some(e.to_string()),
-                table_data: TableData { headers: vec![], rows: vec![] },
+                limit,
+                table_data: TableData::default(),
             }))
         }
     }
@@ -1452,21 +1463,108 @@ async fn outputs(
         .ok_or(ErrorBadRequest("sql not found"))?
         .to_owned();
 
+    // the field name picks the format; csv is both the default and a name
     let output_format = if form.contains_key("jsonl") {
         OutputFormat::JSON
     } else if form.contains_key("tab") {
         OutputFormat::TSV
-    } else if form.contains_key("csv") {
-        OutputFormat::CSV
     } else {
         OutputFormat::CSV
     };
 
-    match output_stream(app_data, sql, output_format).await {
-        Ok(res) => return Ok(res),
-        Err(e) => return Err(e),
-    }
+    // A limit turns this into an exact answer rather than a stream: at most
+    // that many rows are collected before anything is sent, so the response
+    // can carry the row count and whether there was more — neither of which a
+    // streamed body can say, because its headers are already gone by then.
+    let limit = match form.get("limit").map(|value| value.trim()) {
+        None | Some("") => None,
+        Some(value) => Some(
+            value
+                .parse::<usize>()
+                .map_err(|_| ErrorBadRequest(format!("limit must be a whole number, not {:?}", value)))?,
+        ),
+    };
 
+    match limit {
+        Some(limit) => output_limited(app_data, sql, output_format, limit).await,
+        None => output_stream(app_data, sql, output_format).await,
+    }
+}
+
+/// An export of at most `limit` rows, buffered so the reply can describe
+/// itself: `X-Sqlnow-Rows` is what the body holds and `X-Sqlnow-Truncated`
+/// says whether the limit cut it off. Memory is bounded by the limit the
+/// caller chose.
+async fn output_limited(
+    app_data: web::Data<AppData>,
+    sql: String,
+    output: OutputFormat,
+    limit: usize,
+) -> Result<HttpResponse, Error> {
+    let held = held_connection(&app_data)
+        .await
+        .map_err(|e| ErrorInternalServerError(e.to_string()))?;
+    let table_data = run_query(&sql, held.get(), limit).map_err(|e| ErrorBadRequest(e.to_string()))?;
+    drop(held);
+
+    let body = render_rows(&table_data, output).map_err(ErrorInternalServerError)?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Content-Disposition", content_disposition(output)))
+        .insert_header(("Content-Type", content_type(output)))
+        .insert_header(("X-Sqlnow-Rows", table_data.rows.len().to_string()))
+        .insert_header(("X-Sqlnow-Truncated", table_data.truncated.to_string()))
+        .body(body))
+}
+
+/// A whole result as one string, in the format the caller asked for. Shared
+/// with the streaming path's row writing so the two cannot drift.
+fn render_rows(table_data: &TableData, output: OutputFormat) -> Result<String, csv::Error> {
+    match output {
+        OutputFormat::CSV | OutputFormat::TSV => {
+            let delimiter = if matches!(output, OutputFormat::TSV) { b'\t' } else { b',' };
+            let mut writer = WriterBuilder::new().delimiter(delimiter).from_writer(Vec::new());
+            writer.write_record(&table_data.headers)?;
+            for row in &table_data.rows {
+                writer.write_record(row)?;
+            }
+            let buf = writer.into_inner().map_err(|e| e.into_error())?;
+            Ok(String::from_utf8_lossy(&buf).into_owned())
+        }
+        OutputFormat::JSON => {
+            let mut body = String::new();
+            for row in &table_data.rows {
+                body.push_str(&json_object(&table_data.headers, row).to_string());
+                body.push('\n');
+            }
+            Ok(body)
+        }
+    }
+}
+
+/// One row as a json object, keys in column order.
+fn json_object(headers: &[String], row: &[String]) -> serde_json::Value {
+    let map: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .zip(row.iter())
+        .map(|(header, value)| (header.clone(), json!(value)))
+        .collect();
+    serde_json::Value::Object(map)
+}
+
+fn content_disposition(output: OutputFormat) -> &'static str {
+    match output {
+        OutputFormat::CSV => "attachment; filename=download.csv",
+        OutputFormat::TSV => "attachment; filename=download.tsv",
+        OutputFormat::JSON => "attachment; filename=download.json",
+    }
+}
+
+fn content_type(output: OutputFormat) -> &'static str {
+    match output {
+        OutputFormat::CSV => "text/csv",
+        OutputFormat::TSV => "text/tab-separated-values",
+        OutputFormat::JSON => "application/json",
+    }
 }
 
 #[derive(PartialEq, Copy, Clone)]
@@ -1520,7 +1618,7 @@ async fn output_stream(
     app_data: web::Data<AppData>,
     sql: String,
     output: OutputFormat,
-) -> Result<impl Responder, Error> {
+) -> Result<HttpResponse, Error> {
 
     // Prepare once before the response exists, and throw the statement away.
     // Once the headers are out an error can only truncate the body — which is
@@ -1599,14 +1697,10 @@ async fn output_stream(
                     yield Ok::<Bytes, Error>(Bytes::from(buf));
                 }
                 OutputFormat::JSON => {
-                    // an ordered map, so the keys come out in column order on
-                    // every row rather than however a hash happened to land
-                    let map: serde_json::Map<String, serde_json::Value> = headers
-                        .iter()
-                        .zip(row.iter())
-                        .map(|(header, value)| (header.clone(), json!(value)))
-                        .collect();
-                    serde_json::to_writer(&mut buf, &map).map_err(ErrorInternalServerError)?;
+                    // keys in column order on every row, rather than however a
+                    // hash happened to land
+                    let object = json_object(&headers, &row);
+                    serde_json::to_writer(&mut buf, &object).map_err(ErrorInternalServerError)?;
                     yield Ok::<Bytes, Error>(Bytes::from(buf));
                     yield Ok::<Bytes, Error>(Bytes::from("\n"));
                 }
@@ -1614,21 +1708,9 @@ async fn output_stream(
         }
     };
 
-    let content_disposition = match output {
-        OutputFormat::CSV => "attachment; filename=download.csv",
-        OutputFormat::TSV => "attachment; filename=download.tsv",
-        OutputFormat::JSON => "attachment; filename=download.json",
-    };
-
-    let content_type = match output {
-        OutputFormat::CSV => "text/csv",
-        OutputFormat::TSV => "text/tab-separated-values",
-        OutputFormat::JSON => "application/json",
-    };
-
     Ok(HttpResponse::Ok()
-        .insert_header(("Content-Disposition", content_disposition))
-        .insert_header(("Content-Type", content_type))
+        .insert_header(("Content-Disposition", content_disposition(output)))
+        .insert_header(("Content-Type", content_type(output)))
         .streaming(Box::pin(output_stream)))
 }
 

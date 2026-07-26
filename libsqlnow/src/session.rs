@@ -639,7 +639,7 @@ fn run_raw(conn: &Connection, sql: &str) -> std::result::Result<TableData, Sessi
             // identically here)
             conn.execute_batch(sql)
                 .map_err(|_| SessionError::Db(prepare_error.to_string()))?;
-            Ok(TableData { headers: vec![], rows: vec![] })
+            Ok(TableData { headers: vec![], rows: vec![], truncated: false })
         }
     }
 }

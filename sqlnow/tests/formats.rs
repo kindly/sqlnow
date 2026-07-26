@@ -50,9 +50,11 @@ fn sql_prints_what_it_was_asked_for() {
     let jsonl = space.run_text(&["sql", "scratch.sqlnow", &query, "-f", "jsonl"]);
     assert_eq!(jsonl.trim().lines().count(), 2);
 
-    // and a limit cuts the rows, not just the display
-    let limited = space.run_text(&["sql", "scratch.sqlnow", &query, "-f", "csv", "--limit", "1"]);
-    assert_eq!(limited.trim(), "name,co2\nPlant A,120");
+    // and a limit cuts the rows, not just the display. Read from stdout alone:
+    // the note about stopping early belongs on stderr, and is checked in
+    // the_cli_says_when_it_stopped_early
+    let limited = space.run(&["sql", "scratch.sqlnow", &query, "-f", "csv", "--limit", "1"]);
+    assert_eq!(String::from_utf8_lossy(&limited.stdout).trim(), "name,co2\nPlant A,120");
 }
 
 #[test]
@@ -128,4 +130,65 @@ fn jsonl_keys_come_out_in_column_order() {
     for line in jsonl.lines() {
         assert_eq!(line, r#"{"zebra":"1","apple":"2","mango":"3"}"#);
     }
+}
+
+#[test]
+fn a_result_says_whether_it_is_the_whole_answer() {
+    let space = Workspace::new("truncation");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+    let sql = "SELECT i FROM range(1, 100) t(i)";
+
+    // the viewer's route: 500 rows of 500 and 500 rows of a million used to
+    // look identical, which is the difference between an answer and a guess
+    let cut = server.query_with_limit(sql, 2);
+    assert_eq!(cut["limit"], 2);
+    assert_eq!(cut["table_data"]["truncated"], true);
+    assert_eq!(cut["table_data"]["rows"].as_array().unwrap().len(), 2);
+
+    let whole = server.query_with_limit("SELECT i FROM range(1, 3) t(i)", 500);
+    assert_eq!(whole["table_data"]["truncated"], false);
+
+    // an export with a limit is buffered so it can say the same thing in
+    // headers, leaving the body clean for a parser
+    let (body, rows, truncated) = server.export_limited(sql, "csv", 3);
+    assert_eq!(body, "i\n1\n2\n3\n");
+    assert_eq!((rows.as_str(), truncated.as_str()), ("3", "true"));
+
+    let (body, rows, truncated) = server.export_limited("SELECT i FROM range(1, 3) t(i)", "csv", 50);
+    assert_eq!(body, "i\n1\n2\n");
+    assert_eq!((rows.as_str(), truncated.as_str()), ("2", "false"));
+
+    // jsonl is limited the same way, and a nonsense limit is refused rather
+    // than quietly ignored
+    let (body, _, truncated) = server.export_limited(sql, "jsonl", 2);
+    assert_eq!(body.lines().count(), 2);
+    assert_eq!(truncated, "true");
+    let (status, message) =
+        server.export_form_status(&[("sql", sql), ("csv", "1"), ("limit", "lots")]);
+    assert_eq!(status, 400);
+    assert!(message.contains("whole number"), "{}", message);
+
+    // and without a limit it still streams everything, headers and all
+    assert_eq!(server.export(sql, "csv").lines().count(), 100);
+}
+
+#[test]
+fn the_cli_says_when_it_stopped_early() {
+    let space = Workspace::new("cli-truncation");
+    space.exec(&space.path().join("scratch.sqlnow"), "SELECT 1");
+    let sql = "SELECT i FROM range(1, 100) t(i)";
+
+    // the box table has a footer to put it in
+    let boxed = space.run_text(&["sql", "scratch.sqlnow", sql, "--limit", "2"]);
+    assert!(boxed.contains("(2 rows, truncated"), "{}", boxed);
+
+    // csv is meant to be parsed, so the note goes to stderr and stdout stays
+    // exactly the data
+    let out = space.run(&["sql", "scratch.sqlnow", sql, "--limit", "2", "-f", "csv"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "i\n1\n2\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("stopped at 2 rows"));
+
+    // nothing is said when the limit was not reached
+    let out = space.run(&["sql", "scratch.sqlnow", "SELECT 1 AS i", "--limit", "9", "-f", "csv"]);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
