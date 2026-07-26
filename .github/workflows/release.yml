@@ -142,7 +142,13 @@ jobs:
 
       - name: Install
         working-directory: sqlnow-electron
-        run: npm ci
+        shell: bash
+        # npm 12 blocks install scripts unless approved, and electron's is what
+        # fetches its binary — so check for it rather than assume
+        run: |
+          npm ci
+          node -e "process.exit(require('fs').existsSync('node_modules/electron/dist') ? 0 : 1)" \
+            || node node_modules/electron/install.js
 
       - name: Package
         working-directory: sqlnow-electron
@@ -160,7 +166,9 @@ jobs:
           mkdir -p out
           cp sqlnow-electron/dist/sqlnow-desktop-* out/ 2>/dev/null || true
           cd out
-          for f in *; do shasum -a 256 "$f" > "$f.sha256"; done
+          # sha256sum on linux, shasum on macOS: whichever the runner has
+          hash=$(command -v sha256sum || echo "shasum -a 256")
+          for f in *; do $hash "$f" > "$f.sha256"; done
           ls -la
 
       - name: Upload workflow artifacts

@@ -1,7 +1,7 @@
 {
   "name": "sqlnow-desktop",
   "productName": "sqlnow",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Local SQL viewer for files and databases, in a native window",
   "license": "MIT",
   "author": "David Raznick",
