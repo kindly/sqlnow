@@ -27,9 +27,10 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # `cargo test` above covers default-members, which excludes the desktop shell
-  # because it links webkit. Its one test guards a linker-level crash that only
-  # the real binary can show, so it needs a job of its own.
+  # The desktop shell is an electron window over the same server, so the only
+  # thing worth testing is that a real window really does load a real session.
+  # It needs a display, hence xvfb; SQLNOW_SMOKE makes the shell report what it
+  # loaded and exit instead of waiting for someone to close it.
   desktop:
     runs-on: ubuntu-22.04
     steps:
@@ -41,13 +42,35 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sqlnow-electron/package-lock.json
+
+      - name: Build the server
+        run: cargo build --locked -p sqlnow
+
+      - name: Install
+        working-directory: sqlnow-electron
+        run: npm ci
+
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+          sudo apt-get install -y xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libgbm1 libasound2 libxkbcommon0 libgtk-3-0
 
-      - name: Test
-        run: cargo test --locked -p sqlnow-desktop
+      - name: Smoke test
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+          SQLNOW_SMOKE: '1'
+        run: |
+          printf 'name,co2\nPlant A,120\n' > plants.csv
+          xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv \
+            -q 'peek=SELECT * FROM plants' --open peek | tee smoke.log
+          grep -q 'SMOKE .*title=sqlnow tables=plants' smoke.log
 
   ui:
     runs-on: ubuntu-22.04

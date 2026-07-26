@@ -32,23 +32,24 @@ On Arch Linux: `paru -S sqlnow-bin` (or any AUR helper).
 
 `sqlnow-desktop` is the same server and the same UI in a native window instead
 of a browser tab, with the same arguments and the same session store — either
-version can open a session the other left. `Ctrl +` / `Ctrl -` / `Ctrl 0` zoom
-the window, and `F12` (or `Ctrl Shift I`, or right-click → Inspect Element)
-opens the web inspector.
+version can open a session the other left. Zoom (`Ctrl +` / `Ctrl -` /
+`Ctrl 0`) and the web inspector (`F12`) are the browser's own.
 
-It starts at your desktop's own text scale (GTK's Xft DPI), because WebKitGTK
-does not apply that itself: without it the page renders at one pixel per CSS
-pixel whatever the screen's density, which on a high-DPI display makes the
-results grid — drawn on a canvas — noticeably coarser than the same page in a
-browser. `Ctrl 0` returns to that scale rather than to 100%. On Arch: `paru -S
-sqlnow-desktop-bin`. Elsewhere, take `sqlnow-desktop-<target>.tar.gz` from the
-releases page; it is one executable, but unlike the CLI it links the host's web
-stack, so it needs webkit2gtk-4.1 and GTK 3 installed (an AppImage that carries
-its own is the plan). macOS and Windows builds are not published yet.
+It is an Electron shell around the same `sqlnow` binary: the window is pointed
+at the local server exactly as a browser tab would be, and the server is stopped
+when the window closes. Electron rather than a system webview so that the
+renderer is the same on every platform — three webviews meant three text
+rasterisers, and the results grid is drawn on a canvas, which shows the
+difference plainly.
 
-Build it yourself with `cargo build --release -p sqlnow-desktop` — it is left
-out of the default workspace members so a plain `cargo build` does not need
-webkit at all.
+On Arch: `paru -S sqlnow-desktop-bin`. Elsewhere, take the AppImage (Linux),
+`.dmg` (macOS) or installer (Windows) from the releases page; each carries its
+own copy of `sqlnow`, so nothing else is needed. The macOS and Windows builds
+are unsigned, so they warn on first run.
+
+Build it yourself with `cargo build --release -p sqlnow` then
+`cd sqlnow-electron && npm install && npm run dist` (or `npm start` to run it
+without packaging).
 
 ### Build from source
 

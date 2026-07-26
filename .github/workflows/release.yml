@@ -96,21 +96,13 @@ jobs:
             sqlnow-*.deb
             sqlnow-*.rpm
 
-  # The desktop shell is built on its own because it links webkit2gtk and GTK:
-  # system packages the portable CLI does not need, which is why it is left out
-  # of the workspace's default members and so out of the job above.
+  # The desktop shell: an electron window over the same server binary, packaged
+  # per platform by electron-builder. One renderer everywhere, which is why it
+  # replaced the tauri shell — three system webviews meant three text
+  # rasterisers and no way to test the two you do not run.
   #
-  # The artifact is the binary plus its desktop entry and icon — one executable
-  # with the UI and DuckDB inside it, but dynamically linked against the host's
-  # web stack, so it is only useful to a package that can declare those
-  # dependencies (currently the AUR's sqlnow-desktop-bin). An AppImage, which
-  # would carry webkit itself and run on any distribution, is the intended
-  # answer for wider distribution: it needs the tauri CLI and linuxdeploy added
-  # to this job, and replaces the tarball rather than the whole approach.
-  #
-  # Linux only for now. macOS and Windows are perfectly buildable — WKWebView
-  # and WebView2 are already what tauri would use — but nothing here compiles
-  # them, so those paths are untested.
+  # Each job builds the server for its own platform first: electron-builder
+  # copies it in as a resource, so the app is self-contained.
   desktop:
     name: desktop ${{ matrix.target }}
     strategy:
@@ -121,6 +113,10 @@ jobs:
             runs-on: ubuntu-22.04 # oldest supported = lowest glibc floor
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            runs-on: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
 
     runs-on: ${{ matrix.runs-on }}
     steps:
@@ -135,35 +131,46 @@ jobs:
         with:
           key: desktop-${{ matrix.target }}
 
-      - name: System dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sqlnow-electron/package-lock.json
 
-      - name: Build
-        run: cargo build --release --locked -p sqlnow-desktop
+      - name: Build the server
+        run: cargo build --release --locked -p sqlnow
+
+      - name: Install
+        working-directory: sqlnow-electron
+        run: npm ci
 
       - name: Package
+        working-directory: sqlnow-electron
+        # unsigned on mac and windows: signing needs certificates this project
+        # does not have, so the installers warn on first run
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx --no-install electron-builder --publish never
+
+      - name: Collect
+        shell: bash
+        # electron-builder names them itself (artifactName in package.json), so
+        # this only gathers them and writes the checksums
         run: |
-          mkdir -p dist
-          cp target/release/sqlnow-desktop LICENSE README.md AGENTS.md dist/
-          cp sqlnow-desktop/sqlnow-desktop.desktop dist/
-          # named after the Icon= key, which is what a desktop entry looks up
-          cp sqlnow-desktop/icons/128x128.png dist/sqlnow-desktop.png
-          tar -C dist -czf sqlnow-desktop-${{ matrix.target }}.tar.gz \
-            sqlnow-desktop sqlnow-desktop.desktop sqlnow-desktop.png \
-            LICENSE README.md AGENTS.md
-          shasum -a 256 sqlnow-desktop-${{ matrix.target }}.tar.gz \
-            > sqlnow-desktop-${{ matrix.target }}.tar.gz.sha256
+          mkdir -p out
+          cp sqlnow-electron/dist/sqlnow-desktop-* out/ 2>/dev/null || true
+          cd out
+          for f in *; do shasum -a 256 "$f" > "$f.sha256"; done
+          ls -la
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sqlnow-desktop-${{ matrix.target }}
-          path: sqlnow-desktop-*.tar.gz*
+          path: out/*
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: sqlnow-desktop-*.tar.gz*
+          files: out/*

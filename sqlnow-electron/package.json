@@ -1,0 +1,56 @@
+{
+  "name": "sqlnow-desktop",
+  "productName": "sqlnow",
+  "version": "0.4.2",
+  "description": "Local SQL viewer for files and databases, in a native window",
+  "license": "MIT",
+  "author": "David Raznick",
+  "homepage": "https://github.com/kindly/sqlnow",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "SQLNOW_SMOKE=1 electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
+  },
+  "build": {
+    "appId": "io.github.kindly.sqlnow",
+    "productName": "sqlnow",
+    "artifactName": "sqlnow-desktop-${os}-${arch}.${ext}",
+    "files": ["main.js", "icons/**"],
+    "extraResources": [
+      {
+        "from": "../target/release/sqlnow",
+        "to": "sqlnow"
+      }
+    ],
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Development",
+      "icon": "icons",
+      "desktop": {
+        "entry": {
+          "Name": "sqlnow",
+          "GenericName": "SQL viewer",
+          "Comment": "Local SQL viewer for files and databases",
+          "Categories": "Development;Database;",
+          "MimeType": "text/csv;application/vnd.apache.parquet;application/x-sqlite3;"
+        }
+      }
+    },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": ["nsis"]
+    }
+  }
+}
