@@ -122,6 +122,8 @@ pub enum Command {
         /// Path to the DuckDB database file
         database: String,
         /// SQL to run (multiple statements allowed; only a single statement returns rows)
+        // SQL that opens with a `--` comment would otherwise look like a flag
+        #[arg(allow_hyphen_values = true)]
         sql: String,
         /// Output format
         #[arg(short, long, value_enum, default_value_t = SqlFormat::Box)]
@@ -138,6 +140,7 @@ pub enum Command {
         /// Path to the session file
         session: String,
         /// SQL to run (multiple statements allowed; only a single statement returns rows)
+        #[arg(allow_hyphen_values = true)]
         sql: String,
         /// Output format
         #[arg(short, long, value_enum, default_value_t = SqlFormat::Csv)]
@@ -1232,10 +1235,7 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
                 session
             }
             None => {
-                eprintln!(
-                    "note: no writable config directory for the session store, \
-                     continuing in memory"
-                );
+                // the session summary below says the same thing, with the hint
                 Session::in_memory()?
             }
         },
@@ -1440,7 +1440,8 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
         match (persistent, resumed_queries) {
             (false, _) => println!(
                 "note: session not persisted — no writable config directory for the \
-                 session store, so queries and history last only for this run"
+                 session store, so queries and history last only for this run. \
+                 Set XDG_CONFIG_HOME to somewhere writable to keep them."
             ),
             (true, Some(count)) => println!(
                 "note: resumed session {} ({} saved {})",

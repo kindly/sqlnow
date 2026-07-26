@@ -29,7 +29,7 @@ use serde_json::{self, json};
 use std::collections::HashMap;
 use std::{sync::Arc, vec};
 use tokio::sync::Mutex;
-use duckdb::types::{ListType, ValueRef};
+use duckdb::types::{EnumType, ListType, ValueRef};
 
 static STATIC_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static");
 
@@ -1035,6 +1035,65 @@ mod tests {
     }
 
     #[test]
+    fn containers_render_one_row_at_a_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        // every one of these arrives as an arrow array plus a row index, and
+        // ignoring the index used to paste the whole column into every row
+        let table_data = run_query(
+            "SELECT i,
+                    [i, i * 10] AS lst,
+                    {'a': i, 'b': 'x'} AS st,
+                    MAP {'k': i} AS mp,
+                    [i, i * 2]::INT[2] AS arr,
+                    [{'a': i}] AS nested
+             FROM range(1, 4) t(i) ORDER BY i",
+            &conn,
+            10,
+        )
+        .unwrap();
+        assert_eq!(table_data.rows.len(), 3);
+        let lists: Vec<&String> = table_data.rows.iter().map(|row| &row[1]).collect();
+        assert_eq!(lists, ["[1, 10]", "[2, 20]", "[3, 30]"]);
+        assert_eq!(table_data.rows[0][2], "{a: 1, b: x}");
+        assert_eq!(table_data.rows[1][3], "{k: 2}");
+        assert_eq!(table_data.rows[2][4], "[3, 6]");
+        assert_eq!(table_data.rows[0][5], "[{a: 1}]");
+    }
+
+    #[test]
+    fn a_struct_column_is_a_value_not_a_panic() {
+        // this panicked with "Type not supported", which over HTTP arrived as an
+        // empty body: the one case where a wrong answer was invisible
+        let conn = Connection::open_in_memory().unwrap();
+        let table_data =
+            run_query("SELECT {'a': 1} AS st", &conn, 10).expect("a struct is renderable");
+        assert_eq!(table_data.rows[0][0], "{a: 1}");
+    }
+
+    #[test]
+    fn enums_unions_and_intervals_format_as_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TYPE mood AS ENUM ('ok', 'bad');").unwrap();
+        let table_data = run_query(
+            "SELECT 'bad'::mood AS m,
+                    union_value(num := 4) AS u,
+                    INTERVAL 13 MONTHS + INTERVAL 2 DAYS + INTERVAL 3661 SECONDS AS iv,
+                    INTERVAL 90 MINUTES AS clock,
+                    340282366920938463463374607431768211455::UHUGEINT AS big",
+            &conn,
+            10,
+        )
+        .unwrap();
+        let row = &table_data.rows[0];
+        assert_eq!(row[0], "bad");
+        assert_eq!(row[1], "{num=4}");
+        // months and days never collapse into the clock: no calendar here
+        assert_eq!(row[2], "1 year 1 month 2 days 01:01:01");
+        assert_eq!(row[3], "01:30:00");
+        assert_eq!(row[4], "340282366920938463463374607431768211455");
+    }
+
+    #[test]
     fn timestamps_dates_and_times_format_as_text() {
         let conn = Connection::open_in_memory().unwrap();
         let table_data = run_query(
@@ -1067,9 +1126,9 @@ pub fn main_web(service_config: &mut ServiceConfig) {
        .default_service(web::get().to(ui));
 }
 
-fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Result<Vec<String>> {
+fn process_row(row: &duckdb::Row, headers: &[String]) -> Result<Vec<String>> {
     let mut data = vec![];
-    for i in 0..headers.len() {
+    for (i, header) in headers.iter().enumerate() {
         let value =  match row.get_ref(i).unwrap() {
             ValueRef::Null => "".to_string(),
             ValueRef::Boolean(bool) => bool.to_string(),
@@ -1092,28 +1151,37 @@ fn process_row(row: &duckdb::Row, headers: &Vec<String>) -> Result<Vec<String>> 
             ValueRef::Time64(unit, value) => {
                 format_time_micros(to_micros(unit, value).rem_euclid(86_400_000_000))
             }
-            ValueRef::List(array,_) => {
-                match array {
-                    ListType::Regular(array) => {
-                        let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
-                        let mut buffer = String::new();
-                        for i in 0..array.len() {
-                            formatter.value(i).write(&mut buffer).unwrap()
-                        }
-                        buffer
-                    }
-                    ListType::Large(array) => {
-                        let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
-                        let mut buffer = String::new();
-                        for i in 0..array.len() {
-                            formatter.value(i).write(&mut buffer).unwrap()
-                        }
-                        buffer
-                    }
-                }
-
+            ValueRef::UHugeInt(int) => int.to_string(),
+            ValueRef::Interval { months, days, nanos } => format_interval(months, days, nanos),
+            // WKB, which is not text: hex keeps it readable and reversible
+            ValueRef::Geometry(bytes) => {
+                bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
+            }
+            // Every container type arrives as an arrow array plus this row's
+            // index into it. The index is the whole point: formatting the array
+            // without it renders the entire column into every row.
+            ValueRef::List(array, index) => match array {
+                ListType::Regular(array) => format_array_value(array, index)?,
+                ListType::Large(array) => format_array_value(array, index)?,
             },
-            _ => panic!("Type not supported"),
+            ValueRef::Enum(array, index) => match array {
+                EnumType::UInt8(array) => format_array_value(array, index)?,
+                EnumType::UInt16(array) => format_array_value(array, index)?,
+                EnumType::UInt32(array) => format_array_value(array, index)?,
+            },
+            ValueRef::Struct(array, index) => format_array_value(array, index)?,
+            ValueRef::Array(array, index) => format_array_value(array, index)?,
+            ValueRef::Map(array, index) => format_array_value(array, index)?,
+            ValueRef::Union(array, index) => format_array_value(array.as_ref(), index)?,
+            // ValueRef is non_exhaustive, so a new duckdb type could still turn
+            // up here. Saying so beats a panic, and beats inventing a value.
+            other => {
+                return Err(eyre::eyre!(
+                    "column {} holds a {:?} value, which sqlnow cannot render yet",
+                    header,
+                    other.data_type()
+                ))
+            }
         };
         data.push(value)
     }
@@ -1137,6 +1205,45 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 fn format_date(days: i64) -> String {
     let (y, m, d) = civil_from_days(days);
     format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// One value out of an arrow array, as text.
+///
+/// duckdb hands back containers (lists, structs, maps, enums, unions) as the
+/// column's arrow array together with the row's index into it, so both are
+/// needed to render one cell.
+fn format_array_value(array: &dyn Array, index: usize) -> Result<String> {
+    let formatter = ArrayFormatter::try_new(array, &FormatOptions::default())?;
+    let mut buffer = String::new();
+    formatter
+        .value(index)
+        .write(&mut buffer)
+        .map_err(|e| eyre::eyre!("could not format a value: {}", e))?;
+    Ok(buffer)
+}
+
+/// An interval as duckdb prints it: months and days stay separate from the
+/// clock, because neither converts to the other without a calendar.
+fn format_interval(months: i32, days: i32, nanos: i64) -> String {
+    let mut parts: Vec<String> = vec![];
+    let unit = |count: i64, name: &str| {
+        format!("{} {}{}", count, name, if count.abs() == 1 { "" } else { "s" })
+    };
+    if months / 12 != 0 {
+        parts.push(unit((months / 12) as i64, "year"));
+    }
+    if months % 12 != 0 {
+        parts.push(unit((months % 12) as i64, "month"));
+    }
+    if days != 0 {
+        parts.push(unit(days as i64, "day"));
+    }
+    if nanos != 0 || parts.is_empty() {
+        let micros = nanos / 1_000;
+        let sign = if micros < 0 { "-" } else { "" };
+        parts.push(format!("{}{}", sign, format_time_micros(micros.abs())));
+    }
+    parts.join(" ")
 }
 
 fn format_time_micros(micros: i64) -> String {

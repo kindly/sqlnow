@@ -224,7 +224,11 @@ sqlnow sql data.duckdb "CREATE TABLE summary AS SELECT region, sum(total) FROM s
 ```
 
 Writes persist in the file. Values in json/jsonl output are strings (the
-same stringification the UI grid uses). This works even while a sqlnow
+same stringification the UI grid uses) — including containers, which render
+the way duckdb prints them: a `LIST` as `[1, 10]`, a `STRUCT` as `{a: 1}`, a
+`MAP` as `{k: 1}`. If you need the parts separately, unnest or cast in SQL
+(`array_to_string(lst, ',')`, `to_json(st)`) rather than parsing that text.
+SQL may begin with a `--` comment; no `--` separator is needed. This works even while a sqlnow
 server has the database open — the server holds no connection between
 requests — though a concurrent operation can occasionally hit a lock (brief
 automatic retry, then a clear error). On a running server the HTTP

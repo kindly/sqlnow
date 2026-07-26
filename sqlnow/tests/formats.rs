@@ -54,3 +54,50 @@ fn sql_prints_what_it_was_asked_for() {
     let limited = space.run_text(&["sql", "scratch.sqlnow", &query, "-f", "csv", "--limit", "1"]);
     assert_eq!(limited.trim(), "name,co2\nPlant A,120");
 }
+
+#[test]
+fn container_columns_survive_every_route_out() {
+    let space = Workspace::new("containers");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+    let sql = "SELECT i, [i, i * 10] AS lst, {'a': i} AS st FROM range(1, 4) t(i) ORDER BY i";
+
+    // the viewer: a list used to arrive as the whole column pasted into every
+    // row, and a struct as an empty body from a panicked handler
+    let rows = server.query(sql)["table_data"]["rows"].clone();
+    let lists: Vec<&str> =
+        rows.as_array().unwrap().iter().map(|row| row[1].as_str().unwrap()).collect();
+    assert_eq!(lists, ["[1, 10]", "[2, 20]", "[3, 30]"]);
+    assert_eq!(rows[0][2], "{a: 1}");
+
+    // and the downloads, which share the same stringification
+    assert_eq!(
+        server.export(sql, "csv"),
+        "i,lst,st\n1,\"[1, 10]\",{a: 1}\n2,\"[2, 20]\",{a: 2}\n3,\"[3, 30]\",{a: 3}\n"
+    );
+    let jsonl = server.export(sql, "jsonl");
+    let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert_eq!(first["lst"], "[1, 10]");
+
+    // the CLI path too, which stringifies the same way
+    space.exec(&space.path().join("scratch.sqlnow"), "SELECT 1");
+    let text = space.run_text(&["sql", "scratch.sqlnow", sql, "-f", "csv"]);
+    assert!(text.contains("\"[2, 20]\""), "{}", text);
+}
+
+#[test]
+fn sql_can_start_with_a_comment() {
+    let space = Workspace::new("leading-comment");
+    space.exec(&space.path().join("scratch.sqlnow"), "SELECT 1");
+
+    // clap would read this as a flag without allow_hyphen_values, and an agent
+    // pasting a commented query has no reason to expect a `--` separator
+    for command in ["sql", "exec"] {
+        let out = space.run(&[command, "scratch.sqlnow", "-- what this does\nSELECT 42 AS answer"]);
+        assert!(out.status.success(), "{}: {}", command, String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("42"));
+    }
+
+    // and a flag after the sql is still a flag
+    let out = space.run_text(&["sql", "scratch.sqlnow", "SELECT 42 AS answer", "-f", "csv"]);
+    assert_eq!(out.trim(), "answer\n42");
+}
