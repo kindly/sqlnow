@@ -164,7 +164,12 @@ jobs:
         # this only gathers them and writes the checksums
         run: |
           mkdir -p out
-          cp sqlnow-electron/dist/sqlnow-desktop-* out/ 2>/dev/null || true
+          # the installers only: electron-builder also writes .blockmap files
+          # for its own delta updates, which nothing here uses
+          for f in sqlnow-electron/dist/sqlnow-desktop-*; do
+            case "$f" in *.blockmap|*.yml) continue;; esac
+            cp "$f" out/
+          done
           cd out
           # sha256sum on linux, shasum on macOS: whichever the runner has
           hash=$(command -v sha256sum || echo "shasum -a 256")
