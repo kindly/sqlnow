@@ -378,9 +378,13 @@ async function buildMenu() {
     type: 'checkbox',
     checked: session.current === true,
     enabled: session.current !== true,
-    // a session already being served is opened on its own address rather than
-    // started again, which the server would refuse anyway
-    click: () => (session.url ? showSession(session.url) : openSession(['--resume', session.id])),
+    // Always through the launcher, never straight at the recorded address: it
+    // is what a server published when it opened the session, and a server that
+    // died without a clean shutdown left it behind — following one of those
+    // opens a window on a dead port, which is a blank page. If the session
+    // really is being served the launcher refuses and says where, and that
+    // address has just been proven.
+    click: () => openSession(['--resume', session.id]),
   }));
 
   const template = [
@@ -508,7 +512,8 @@ async function main() {
   await buildMenu();
 
   if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK
-      || process.env.SQLNOW_WINDOW_CHECK || process.env.SQLNOW_LIVE_CHECK) {
+      || process.env.SQLNOW_WINDOW_CHECK || process.env.SQLNOW_LIVE_CHECK
+      || process.env.SQLNOW_STALE_CHECK) {
     window.webContents.once('did-finish-load', () => runChecks(window, started));
   }
 
@@ -584,6 +589,29 @@ async function runChecks(window, started) {
         "fetch('/api/session').then(r => r.ok).catch(() => false)"
       );
       console.log(`LIVE after=${wait}ms server_alive=${alive} page_can_reach_it=${answered}`);
+    }
+
+    if (process.env.SQLNOW_STALE_CHECK) {
+      // a session whose recorded address belongs to nothing, which is what a
+      // server killed outright leaves behind
+      const sessions = await storedSessions(windows.get(window).url);
+      const other = sessions.find((entry) => entry.current !== true);
+      const item = Menu.getApplicationMenu()
+        .items.find((menu) => menu.label.includes('Session'))
+        .submenu.items.find((entry) => !entry.checked && entry.enabled);
+      item.click();
+      await new Promise((done) => setTimeout(done, 6000));
+
+      const opened = [...windows.keys()].filter((win) => win !== window);
+      const reachable = opened.length
+        ? await opened[0].webContents.executeJavaScript(
+            "fetch('/api/session').then(r => r.ok).catch(() => false)"
+          )
+        : false;
+      console.log(
+        `STALE claimed=${other?.url ?? 'none'} windows=${opened.length + 1}` +
+          ` opened_reachable=${reachable}`
+      );
     }
 
     if (process.env.SQLNOW_WINDOW_CHECK) {

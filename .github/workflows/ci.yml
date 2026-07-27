@@ -89,6 +89,22 @@ jobs:
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee live.log
           grep -q 'LIVE after=6000ms server_alive=true page_can_reach_it=true' live.log
 
+      - name: A session whose address is stale
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+          SQLNOW_STALE_CHECK: '1'
+        # a server killed outright leaves its address in the store; following
+        # one opens a window on a dead port, which is a blank page
+        run: |
+          printf 'c,d\n3,4\n' > other.csv
+          "$SQLNOW_BIN" other.csv --port 0 &
+          sleep 5 && kill -9 %1 || true
+          "$SQLNOW_BIN" exec "$HOME/.config/sqlnow/sessions.sqlnow" \
+            "UPDATE sessions SET url = 'http://127.0.0.1:9'" > /dev/null
+          xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee stale.log
+          grep -q 'STALE claimed=http://127.0.0.1:9 .* opened_reachable=true' stale.log
+
       - name: Menu
         working-directory: sqlnow-electron
         env:
