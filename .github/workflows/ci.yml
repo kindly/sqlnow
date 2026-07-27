@@ -151,6 +151,26 @@ jobs:
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee zoom.log
           grep -q 'ZOOM start .* ctrl+= -> 1.00 .* ctrl+0 -> 0.00 .* plain = -> 0.00' zoom.log
 
+  # Nothing else here compiles for windows, so a unix-only import — the signal
+  # handling was one — got through to the release build and failed there, after
+  # everything else had already been published. This is the cheapest thing that
+  # would have caught it: no linking, no packaging, just does it compile.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+
+      - name: Check
+        run: cargo check --locked -p sqlnow
+
   ui:
     runs-on: ubuntu-22.04
     steps:

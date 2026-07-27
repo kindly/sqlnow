@@ -1520,6 +1520,33 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     Ok(Prepared { app_data, open_query, host, port, closer })
 }
 
+/// The same, for windows, which has console events rather than signals.
+///
+/// Both are built here rather than inside the spawned task for the same reason
+/// as on unix: they register as they are constructed, so a stop arriving
+/// between binding and announcing still finds a handler.
+#[cfg(windows)]
+pub fn stop_on_signals(server: &Server) {
+    use tokio::signal::windows::{ctrl_c, ctrl_close};
+
+    let (mut interrupt, mut close) = match (ctrl_c(), ctrl_close()) {
+        (Ok(interrupt), Ok(close)) => (interrupt, close),
+        _ => {
+            eprintln!("note: could not listen for stop events; the session may not be recorded as closed");
+            return;
+        }
+    };
+
+    let handle = server.handle();
+    actix_web::rt::spawn(async move {
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = close.recv() => {}
+        }
+        handle.stop(true).await;
+    });
+}
+
 /// Stop when whoever started us is gone.
 ///
 /// A desktop shell runs this server as a child process and kills it when its
@@ -1530,12 +1557,12 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
 ///
 /// Unix only. Windows has no cheap equivalent, and Electron's own cleanup
 /// covers the ordinary quit there.
+#[cfg(unix)]
 fn watch_parent() {
     let parent: i32 = match env::var("SQLNOW_PARENT_PID").ok().and_then(|pid| pid.parse().ok()) {
         Some(pid) if pid > 1 => pid,
         _ => return,
     };
-    #[cfg(unix)]
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         // signal 0 asks whether the process is there without touching it
@@ -1551,6 +1578,11 @@ fn watch_parent() {
     });
 }
 
+/// Nothing to watch on windows: there is no cheap way to ask whether a pid is
+/// still there, and electron's own cleanup covers the ordinary quit.
+#[cfg(not(unix))]
+fn watch_parent() {}
+
 #[cfg(unix)]
 extern "C" {
     #[link_name = "kill"]
@@ -1563,6 +1595,7 @@ extern "C" {
 /// prompt Ctrl-C or SIGTERM kills the process before anything is listening for
 /// it. Graceful, so in-flight requests finish and the caller still reaches the
 /// code that records the session as closed.
+#[cfg(unix)]
 pub fn stop_on_signals(server: &Server) {
     use tokio::signal::unix::{signal, SignalKind};
 
