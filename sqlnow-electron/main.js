@@ -761,11 +761,17 @@ async function runChecks(window, started) {
       const kinds = await contents.executeJavaScript(
         "fetch('/api/inputs').then(r => r.json()).then(d => d.inputs.map(i => i.kind + ':' + i.name).sort().join(','))"
       );
+      // Both lists offer the same sessions, however many the store happens to
+      // hold: pinning a count made this depend on what earlier steps left
+      // behind, which is not what the menu is being asked about.
+      const offered = Math.min(sessions.length, SESSIONS_LISTED);
+      const listsMatch =
+        listed.length === offered && nested?.submenu.items.length === offered && offered > 0;
       console.log(
         `MENU menus=${menus} file=${file.filter((i) => i.type !== 'separator').length}` +
-          ` sessions=${sessions.length} listed=${listed.length}` +
-          ` current=${listed.filter((item) => item.checked).length}` +
+          ` lists_match=${listsMatch} sessions=${sessions.length} listed=${listed.length}` +
           ` in_new_window=${nested ? nested.submenu.items.length : 0}` +
+          ` current=${listed.filter((item) => item.checked).length}` +
           ` failures=${failures.length} tables=${tables} inputs=${kinds}`
       );
     }
