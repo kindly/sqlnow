@@ -80,14 +80,18 @@ jobs:
         working-directory: sqlnow-electron
         env:
           SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
-          SQLNOW_STARTUP_MS: '2000'
-          SQLNOW_LIVE_CHECK: '6000'
+          # The timeout has to outlast a real startup — a debug build on a
+          # cold runner takes about ten seconds to bind — and the wait has to
+          # outlast the timeout, or the giving-up path fires for real and the
+          # check never runs. That is what happened at 2s and 6s.
+          SQLNOW_STARTUP_MS: '20000'
+          SQLNOW_LIVE_CHECK: '25000'
         # the timer that gives up on a server that never reports was left
         # running after one did: a minute in, the shell SIGKILLed its own
         # server and the window sat there with nothing behind it
         run: |
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee live.log
-          grep -q 'LIVE after=6000ms server_alive=true page_can_reach_it=true' live.log
+          grep -q 'LIVE after=25000ms server_alive=true page_can_reach_it=true' live.log
 
       - name: Switching a window to another session
         working-directory: sqlnow-electron
