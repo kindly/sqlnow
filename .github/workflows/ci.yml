@@ -85,7 +85,7 @@ jobs:
         # default menu, which binds the shifted `+` only
         run: |
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee zoom.log
-          grep -q 'ZOOM ctrl+= -> 1.00 .* ctrl+0 -> 0.00 .* plain = -> 0.00' zoom.log
+          grep -q 'ZOOM start .* ctrl+= -> 1.00 .* ctrl+0 -> 0.00 .* plain = -> 0.00' zoom.log
 
   ui:
     runs-on: ubuntu-22.04

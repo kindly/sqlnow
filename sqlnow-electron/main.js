@@ -223,7 +223,10 @@ async function main() {
         });
       const level = () => window.webContents.getZoomLevel().toFixed(2);
 
-      const log = [];
+      // chromium keeps zoom per host in the profile, so a previous run leaves
+      // this window already zoomed: start from a known level
+      const log = [`start ${level()}`];
+      window.webContents.setZoomLevel(0);
       for (const [label, key, modifiers] of [
         ['ctrl+=', '=', ['control']],
         ['ctrl+= again', '=', ['control']],

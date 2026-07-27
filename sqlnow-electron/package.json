@@ -14,11 +14,8 @@
     "dist": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8"
-  },
-  "allowScripts": {
-    "electron@33.4.11": true
+    "electron": "^43.0.0",
+    "electron-builder": "^26.0.0"
   },
   "build": {
     "appId": "io.github.kindly.sqlnow",
@@ -53,10 +50,12 @@
       "category": "Development",
       "icon": "icons",
       "desktop": {
-        "GenericName": "SQL viewer",
-        "Categories": "Development;Database;",
-        "MimeType": "text/csv;application/vnd.apache.parquet;application/x-sqlite3;",
-        "Keywords": "SQL;DuckDB;CSV;Parquet;query;"
+        "entry": {
+          "GenericName": "SQL viewer",
+          "Categories": "Development;Database;",
+          "MimeType": "text/csv;application/vnd.apache.parquet;application/x-sqlite3;",
+          "Keywords": "SQL;DuckDB;CSV;Parquet;query;"
+        }
       }
     },
     "mac": {
@@ -72,5 +71,8 @@
       ],
       "icon": "icons/1024x1024.png"
     }
+  },
+  "allowScripts": {
+    "electron@43.2.0": true
   }
 }
