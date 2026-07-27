@@ -76,6 +76,19 @@ jobs:
             -q 'peek=SELECT * FROM plants' --open peek | tee smoke.log
           grep -q 'SMOKE .*title=sqlnow tables=plants' smoke.log
 
+      - name: Still alive past the startup timeout
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+          SQLNOW_STARTUP_MS: '2000'
+          SQLNOW_LIVE_CHECK: '6000'
+        # the timer that gives up on a server that never reports was left
+        # running after one did: a minute in, the shell SIGKILLed its own
+        # server and the window sat there with nothing behind it
+        run: |
+          xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee live.log
+          grep -q 'LIVE after=6000ms server_alive=true page_can_reach_it=true' live.log
+
       - name: Menu
         working-directory: sqlnow-electron
         env:

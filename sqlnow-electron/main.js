@@ -22,7 +22,8 @@ const path = require('node:path');
 const readline = require('node:readline');
 
 /// How long to wait for a server to report its address before giving up.
-const STARTUP_MS = 60_000;
+/// Overridable so a test can watch the giving-up path without waiting a minute.
+const STARTUP_MS = Number(process.env.SQLNOW_STARTUP_MS ?? 60_000);
 
 /// The address line arrives first and a deep link (when a query was named) just
 /// after it, so the window waits this long for the second one.
@@ -106,6 +107,16 @@ function startServer(args) {
     let settled = false;
     let complaint = '';
 
+    // Cleared the moment the address arrives. Left running, it killed the
+    // server it was only supposed to give up on: a minute into every session
+    // the shell SIGKILLed its own child, the page lost everything, and the
+    // reject that followed was a no-op because the promise had long resolved.
+    const startupTimer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`sqlnow did not report an address within ${STARTUP_MS / 1000}s`));
+    }, STARTUP_MS);
+    startupTimer.unref?.();
+
     const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => {
       // still printed: the session is reachable from a browser or an agent
@@ -119,6 +130,7 @@ function startServer(args) {
         setTimeout(() => {
           if (settled) return;
           settled = true;
+          clearTimeout(startupTimer);
           resolve({ child, url: address, deepLink });
         }, DEEP_LINK_MS);
       }
@@ -132,19 +144,17 @@ function startServer(args) {
       complaint += text;
     });
 
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`sqlnow did not report an address within ${STARTUP_MS / 1000}s`));
-    }, STARTUP_MS);
-    timer.unref?.();
-
     child.on('exit', (code) => {
+      clearTimeout(startupTimer);
       if (!settled) {
         settled = true;
         reject(new Error(complaint.trim() || `sqlnow exited with ${code} before it bound a port`));
       }
     });
-    child.on('error', (e) => reject(new Error(`could not run ${serverBinary()}: ${e.message}`)));
+    child.on('error', (e) => {
+      clearTimeout(startupTimer);
+      reject(new Error(`could not run ${serverBinary()}: ${e.message}`));
+    });
   });
 }
 
@@ -498,7 +508,7 @@ async function main() {
   await buildMenu();
 
   if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK
-      || process.env.SQLNOW_WINDOW_CHECK) {
+      || process.env.SQLNOW_WINDOW_CHECK || process.env.SQLNOW_LIVE_CHECK) {
     window.webContents.once('did-finish-load', () => runChecks(window, started));
   }
 
@@ -558,6 +568,22 @@ async function runChecks(window, started) {
         log.push(`${label} -> ${level()}`);
       }
       console.log(`ZOOM ${log.join(' | ')}`);
+    }
+
+    if (process.env.SQLNOW_LIVE_CHECK) {
+      // The startup timeout is set low by the caller, so this waits past it:
+      // an uncleared timer killed the server it was watching for, and every
+      // session died a minute in with the window still sitting there.
+      const server = windows.get(window).child;
+      const wait = Number(process.env.SQLNOW_LIVE_CHECK);
+      await new Promise((done) => setTimeout(done, wait));
+      const alive = (() => {
+        try { process.kill(server.pid, 0); return true; } catch { return false; }
+      })();
+      const answered = await contents.executeJavaScript(
+        "fetch('/api/session').then(r => r.ok).catch(() => false)"
+      );
+      console.log(`LIVE after=${wait}ms server_alive=${alive} page_can_reach_it=${answered}`);
     }
 
     if (process.env.SQLNOW_WINDOW_CHECK) {

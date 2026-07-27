@@ -1540,6 +1540,9 @@ fn watch_parent() {
         std::thread::sleep(std::time::Duration::from_secs(1));
         // signal 0 asks whether the process is there without touching it
         if unsafe { process_exists(parent, 0) } != 0 {
+            // never silently: a server that vanishes under a window leaves the
+            // page fetching from nothing, and the reason has to be findable
+            eprintln!("note: the process that started this server (pid {}) is gone; stopping", parent);
             // Leave the way a Ctrl-C does, so the session is recorded as used:
             // the exit runs the same handler the shell's SIGTERM would.
             unsafe { process_exists(std::process::id() as i32, 15) };
