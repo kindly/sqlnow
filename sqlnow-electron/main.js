@@ -149,7 +149,13 @@ function startServer(args) {
 }
 
 /// A window on a session, and the server behind it when we started one.
-function openWindow({ url, child }) {
+///
+/// `url` is the server's address and `target` the page to open — a deep link
+/// when the session names a query to land on. They are kept apart because the
+/// menu asks the *server* things: with the deep link as the base, every request
+/// went to `…/queries/<name>/api/…` and quietly 404'd, which is what left the
+/// session list empty and made attaching fail.
+function openWindow({ url, target, child }) {
   const window = new BrowserWindow({
     width: 1280,
     height: 850,
@@ -165,11 +171,11 @@ function openWindow({ url, child }) {
     },
   });
   windows.set(window, { child, url });
-  window.loadURL(url);
+  window.loadURL(target ?? url);
 
   // links to anywhere else belong in the user's browser, not in this window
-  window.webContents.setWindowOpenHandler(({ url: target }) => {
-    shell.openExternal(target);
+  window.webContents.setWindowOpenHandler(({ url: href }) => {
+    shell.openExternal(href);
     return { action: 'deny' };
   });
 
@@ -205,7 +211,7 @@ async function openSession(args) {
     dialog.showErrorBox('sqlnow', message);
     return;
   }
-  openWindow({ url: started.deepLink ?? started.url, child: started.child });
+  openWindow({ url: started.url, target: started.deepLink, child: started.child });
   buildMenu();
 }
 
@@ -233,14 +239,14 @@ function current() {
 /// Straight to the endpoint an agent would use, and the page picks the change
 /// up on its own: adding an input bumps the session's change stamp, which the
 /// UI is already listening for. Returns what could not be attached.
-async function attachPaths(url, paths) {
+async function attachPaths(url, paths, kind = 'view') {
   const failures = [];
   for (const uri of paths) {
     try {
       const response = await fetch(`${url}/api/inputs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ uri }),
+        body: JSON.stringify({ uri, kind }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
@@ -253,25 +259,58 @@ async function attachPaths(url, paths) {
   return failures;
 }
 
-async function attachData() {
-  const here = current();
-  if (!here) return;
-
-  const picked = await dialog.showOpenDialog(here.window, {
-    title: 'Attach data',
-    buttonLabel: 'Attach',
-    properties: ['openFile', 'multiSelections'],
+/// What each menu item picks, and what it makes of it.
+///
+/// A view reads the file where it lies, so the data stays on disk and a later
+/// launch replays it; a table copies it into the database, which costs the
+/// import once and reads faster after. A database is attached whole, and its
+/// tables appear under its name.
+const ATTACH_KINDS = {
+  view: {
+    title: 'Create view over file',
+    button: 'Create view',
+    kind: 'view',
     filters: [
-      { name: 'Data', extensions: ['csv', 'tsv', 'parquet', 'json', 'jsonl', 'ndjson', 'xlsx'] },
+      { name: 'Data', extensions: ['csv', 'tsv', 'txt', 'parquet', 'json', 'jsonl', 'ndjson', 'xlsx'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  },
+  table: {
+    title: 'Load file as table',
+    button: 'Load',
+    kind: 'table',
+    filters: [
+      { name: 'Data', extensions: ['csv', 'tsv', 'txt', 'parquet', 'json', 'jsonl', 'ndjson', 'xlsx'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  },
+  database: {
+    title: 'Attach database',
+    button: 'Attach',
+    kind: 'view',
+    filters: [
       { name: 'Databases', extensions: ['duckdb', 'ddb', 'db', 'sqlite', 'sqlite3'] },
       { name: 'All files', extensions: ['*'] },
     ],
+  },
+};
+
+async function attachData(which) {
+  const here = current();
+  if (!here) return;
+  const how = ATTACH_KINDS[which];
+
+  const picked = await dialog.showOpenDialog(here.window, {
+    title: how.title,
+    buttonLabel: how.button,
+    properties: ['openFile', 'multiSelections'],
+    filters: how.filters,
   });
   if (picked.canceled || picked.filePaths.length === 0) return;
 
-  const failures = await attachPaths(here.url, picked.filePaths);
+  const failures = await attachPaths(here.url, picked.filePaths, how.kind);
   if (failures.length > 0) {
-    dialog.showErrorBox('Could not attach', failures.join('\n'));
+    dialog.showErrorBox(`Could not ${how.button.toLowerCase()}`, failures.join('\n'));
   }
 }
 
@@ -333,14 +372,16 @@ async function buildMenu() {
     {
       label: '&File',
       submenu: [
-        { id: 'attach', label: 'Attach Data…', accelerator: 'CommandOrControl+O', click: attachData },
-        { id: 'new', label: 'New Session', click: () => openSession([]) },
-        { type: 'separator' },
         {
-          id: 'browser',
-          label: 'Open in Browser',
-          click: () => here && shell.openExternal(here.window.webContents.getURL()),
+          id: 'view',
+          label: 'Create View over File…',
+          accelerator: 'CommandOrControl+O',
+          click: () => attachData('view'),
         },
+        { id: 'table', label: 'Load File as Table…', click: () => attachData('table') },
+        { id: 'database', label: 'Attach Database…', click: () => attachData('database') },
+        { type: 'separator' },
+        { id: 'new', label: 'New Session', click: () => openSession([]) },
         { type: 'separator' },
         { id: 'close', role: 'close', accelerator: 'CommandOrControl+W' },
         { id: 'quit', role: 'quit', accelerator: 'CommandOrControl+Q' },
@@ -440,7 +481,7 @@ async function main() {
     return;
   }
 
-  const window = openWindow({ url: started.deepLink ?? started.url, child: started.child });
+  const window = openWindow({ url: started.url, target: started.deepLink, child: started.child });
   await buildMenu();
 
   if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK) {
@@ -508,20 +549,35 @@ async function runChecks(window, started) {
     if (process.env.SQLNOW_MENU_CHECK) {
       const menu = Menu.getApplicationMenu();
       const menus = menu.items.map((item) => item.label).join(',');
+      const file = menu.items.find((item) => item.label.includes('File')).submenu.items;
       const listed = menu.items.find((item) => item.label.includes('Session')).submenu.items;
-      const sessions = await storedSessions(started.url);
+      // through what the menu itself would use, not the address we happen to
+      // have here: the two differed once, and everything quietly 404'd
+      const here = current();
+      const sessions = await storedSessions(here.url);
 
-      // what the dialog would have handed to the attach
-      const failures = await attachPaths(started.url, [process.env.SQLNOW_MENU_CHECK]);
+      // what each dialog would have handed back, one file per kind
+      const [asView, asTable] = process.env.SQLNOW_MENU_CHECK.split(',');
+      const failures = [
+        ...(await attachPaths(here.url, [asView], 'view')),
+        ...(await attachPaths(here.url, [asTable], 'table')),
+      ];
       const tables = await contents.executeJavaScript(
         "fetch('/tables.json', {method: 'POST'}).then(r => r.json()).then(d => d.tables.map(t => t.name).sort().join(','))"
       );
+      // a view reads the file where it lies; a table was copied in, so it
+      // survives the file going away
+      const kinds = await contents.executeJavaScript(
+        "fetch('/api/inputs').then(r => r.json()).then(d => d.inputs.map(i => i.kind + ':' + i.name).sort().join(','))"
+      );
       console.log(
-        `MENU menus=${menus} sessions=${sessions.length} listed=${listed.length}` +
+        `MENU menus=${menus} file=${file.filter((i) => i.type !== 'separator').length}` +
+          ` sessions=${sessions.length} listed=${listed.length}` +
           ` current=${listed.filter((item) => item.checked).length}` +
-          ` failures=${failures.length} tables=${tables}`
+          ` failures=${failures.length} tables=${tables} inputs=${kinds}`
       );
     }
+
   } catch (e) {
     console.error(`CHECK FAILED ${e.message}`);
     stop(1);

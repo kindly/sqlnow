@@ -35,14 +35,16 @@ of a browser tab, with the same arguments and the same session store — either
 version can open a session the other left. Zoom (`Ctrl +` / `Ctrl -` /
 `Ctrl 0`) and the web inspector (`F12`) are the browser's own.
 
-The menu is how you reach the rest: **File → Attach Data…** picks files or
-databases and attaches them to the running session, **New Session** starts an
-empty one, **Open in Browser** hands the address to your browser, and the
-**Session** menu lists everything `sqlnow --resume` would — opening each in its
-own window, or focusing the window that already has it. Each window owns the
-server behind it, so closing one stops that session and leaves the others
-alone. There is a Close and a Quit in there too, which matters on desktops that
-draw no window decorations.
+The menu is how you reach the rest. **File** adds data to the running session,
+one item per kind: **Create View over File…** leaves the data where it is and
+reads it on each query, **Load File as Table…** copies it into the database
+once, and **Attach Database…** takes a duckdb or sqlite file whole, its tables
+appearing under its name. **New Session** starts an empty one. The **Session**
+menu lists everything `sqlnow --resume` would, opening each in its own window —
+or focusing the window that already has it, since a session is served once.
+Each window owns the server behind it, so closing one stops that session and
+leaves the others alone. There is a Close and a Quit in there too, which
+matters on desktops that draw no window decorations.
 
 It is an Electron shell around the same `sqlnow` binary: the window is pointed
 at the local server exactly as a browser tab would be, and the server is stopped
