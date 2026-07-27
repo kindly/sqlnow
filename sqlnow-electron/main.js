@@ -670,21 +670,26 @@ async function runChecks(window, started) {
       // server killed outright leaves behind
       const sessions = await storedSessions(windows.get(window).url);
       const other = sessions.find((entry) => entry.current !== true);
+
+      // the top of the Session menu, which puts that session in this window
       const item = Menu.getApplicationMenu()
         .items.find((menu) => menu.label.includes('Session'))
-        .submenu.items.find((entry) => !entry.checked && entry.enabled);
+        .submenu.items.find((entry) => entry.type === 'checkbox' && entry.enabled);
       item.click();
-      await new Promise((done) => setTimeout(done, 6000));
+      await new Promise((done) => setTimeout(done, 8000));
 
-      const opened = [...windows.keys()].filter((win) => win !== window);
-      const reachable = opened.length
-        ? await opened[0].webContents.executeJavaScript(
-            "fetch('/api/session').then(r => r.ok).catch(() => false)"
-          )
-        : false;
+      // every window, not just this one: following the stale address opened a
+      // second window on a dead port and left the first one working, which
+      // reads as success if only the first is asked
+      let unreachable = 0;
+      for (const open of windows.keys()) {
+        const id = await open.webContents.executeJavaScript(
+          "fetch('/api/session').then(r => r.json()).then(d => d.id).catch(() => null)"
+        );
+        if (!id) unreachable += 1;
+      }
       console.log(
-        `STALE claimed=${other?.url ?? 'none'} windows=${opened.length + 1}` +
-          ` opened_reachable=${reachable}`
+        `STALE claimed=${other?.url ?? 'none'} windows=${windows.size} unreachable=${unreachable}`
       );
     }
 

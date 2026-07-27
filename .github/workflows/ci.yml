@@ -121,7 +121,7 @@ jobs:
           "$SQLNOW_BIN" exec "$HOME/.config/sqlnow/sessions.sqlnow" \
             "UPDATE sessions SET url = 'http://127.0.0.1:9'" > /dev/null
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee stale.log
-          grep -q 'STALE claimed=http://127.0.0.1:9 .* opened_reachable=true' stale.log
+          grep -q 'STALE claimed=http://127.0.0.1:9 windows=1 unreachable=0' stale.log
 
       - name: Menu
         working-directory: sqlnow-electron
