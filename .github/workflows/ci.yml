@@ -134,7 +134,7 @@ jobs:
           SQLNOW_MENU_CHECK="$PWD/viewme.csv,$PWD/loadme.csv" \
             xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv \
               -q 'peek=SELECT * FROM plants' --open peek | tee menu.log
-          grep -q 'MENU menus=&File,&Session,&View file=6 sessions=1 listed=1 current=1 failures=0 tables=loadme,plants,viewme inputs=table:loadme,view:plants,view:viewme' menu.log
+          grep -q 'MENU menus=&File,&Session,&View file=6 sessions=1 listed=1 current=1 in_new_window=1 failures=0 tables=loadme,plants,viewme inputs=table:loadme,view:plants,view:viewme' menu.log
 
       - name: Zoom keys
         working-directory: sqlnow-electron

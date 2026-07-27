@@ -732,7 +732,11 @@ async function runChecks(window, started) {
       const menu = Menu.getApplicationMenu();
       const menus = menu.items.map((item) => item.label).join(',');
       const file = menu.items.find((item) => item.label.includes('File')).submenu.items;
-      const listed = menu.items.find((item) => item.label.includes('Session')).submenu.items;
+      // only the session entries: the submenu also holds a heading, a
+      // separator and the nested list for opening in a new window
+      const session = menu.items.find((item) => item.label.includes('Session')).submenu;
+      const listed = session.items.filter((item) => item.type === 'checkbox');
+      const nested = session.items.find((item) => item.label.includes('New Window'));
       // through what the menu itself would use, not the address we happen to
       // have here: the two differed once, and everything quietly 404'd
       const here = current();
@@ -756,6 +760,7 @@ async function runChecks(window, started) {
         `MENU menus=${menus} file=${file.filter((i) => i.type !== 'separator').length}` +
           ` sessions=${sessions.length} listed=${listed.length}` +
           ` current=${listed.filter((item) => item.checked).length}` +
+          ` in_new_window=${nested ? nested.submenu.items.length : 0}` +
           ` failures=${failures.length} tables=${tables} inputs=${kinds}`
       );
     }
