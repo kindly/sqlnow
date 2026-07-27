@@ -76,6 +76,18 @@ jobs:
             -q 'peek=SELECT * FROM plants' --open peek | tee smoke.log
           grep -q 'SMOKE .*title=sqlnow tables=plants' smoke.log
 
+      - name: Menu
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+        # the menu is the only way to attach data or reach another session, and
+        # the only Close on a desktop that draws no window decorations
+        run: |
+          printf 'name,mw\nUnit 1,50\n' > extra.csv
+          SQLNOW_MENU_CHECK="$PWD/extra.csv" \
+            xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee menu.log
+          grep -q 'MENU menus=&File,&Session,&View .* current=1 failures=0 tables=extra,plants' menu.log
+
       - name: Zoom keys
         working-directory: sqlnow-electron
         env:

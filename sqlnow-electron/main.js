@@ -10,27 +10,23 @@
 // everywhere. Three webviews meant three text rasterisers, and the one on
 // linux drew the canvas grid noticeably worse than a browser did — a class of
 // difference that can only be found on the machine it happens on.
+//
+// A window and the server behind it are one unit: opening another session
+// starts another server, and closing a window stops the one it owns. The menu
+// is the way in to both, and gives a Close on desktops that draw no window
+// decorations at all.
 
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const readline = require('node:readline');
 
-/// How long to wait for the server to report its address before giving up.
+/// How long to wait for a server to report its address before giving up.
 const STARTUP_MS = 60_000;
 
 /// The address line arrives first and a deep link (when a query was named) just
 /// after it, so the window waits this long for the second one.
 const DEEP_LINK_MS = 150;
-
-/// The sqlnow binary: beside the app when packaged, on PATH when run from a
-/// checkout, or wherever SQLNOW_BIN says.
-function serverBinary() {
-  if (process.env.SQLNOW_BIN) return process.env.SQLNOW_BIN;
-  if (!app.isPackaged) return 'sqlnow';
-  const name = process.platform === 'win32' ? 'sqlnow.exe' : 'sqlnow';
-  return path.join(process.resourcesPath, name);
-}
 
 /// Switches that belong to electron or chromium rather than to sqlnow.
 ///
@@ -59,6 +55,19 @@ const SHELL_SWITCHES = [
   'inspect-brk',
 ];
 
+/// Each window and the server it owns. A window opened on a session something
+/// else is already serving owns nothing, and closing it leaves that server be.
+const windows = new Map();
+
+/// The sqlnow binary: beside the app when packaged, on PATH when run from a
+/// checkout, or wherever SQLNOW_BIN says.
+function serverBinary() {
+  if (process.env.SQLNOW_BIN) return process.env.SQLNOW_BIN;
+  if (!app.isPackaged) return 'sqlnow';
+  const name = process.platform === 'win32' ? 'sqlnow.exe' : 'sqlnow';
+  return path.join(process.resourcesPath, name);
+}
+
 /// Everything the user typed that the server should see.
 ///
 /// Electron keeps argv[0] for itself and, unpackaged, argv[1] is the app path.
@@ -77,13 +86,15 @@ function serverArgs() {
   });
 }
 
-/// Start the server and resolve with the address it bound.
+/// Start a server and resolve with the address it bound.
 ///
-/// Port 0 unless asked otherwise, so opening the app twice cannot fail on a
-/// busy 8080 — the real port is read back from what it prints.
-function startServer() {
-  const child = spawn(serverBinary(), [...serverArgs(), '--port', process.env.PORT ?? '0'], {
-    stdio: ['ignore', 'pipe', 'inherit'],
+/// Port 0 unless asked otherwise, so a second session — or the app opened
+/// twice — cannot fail on a busy 8080; the real port is read back from what it
+/// prints. A refusal to start is the server's to explain, so its message is
+/// kept and shown rather than replaced.
+function startServer(args) {
+  const child = spawn(serverBinary(), [...args, '--port', process.env.PORT ?? '0'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
     // so the server stops on its own if this process is killed outright rather
     // than quitting: otherwise it keeps listening and keeps the session open,
     // and the app refuses to reopen it
@@ -93,11 +104,7 @@ function startServer() {
   return new Promise((resolve, reject) => {
     let deepLink = null;
     let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    };
+    let complaint = '';
 
     const lines = readline.createInterface({ input: child.stdout });
     lines.on('line', (line) => {
@@ -109,8 +116,20 @@ function startServer() {
       }
       const address = line.startsWith('Server running on ') ? line.slice(18).trim() : null;
       if (address) {
-        setTimeout(() => finish({ child, url: deepLink ?? address }), DEEP_LINK_MS);
+        setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          resolve({ child, url: address, deepLink });
+        }, DEEP_LINK_MS);
       }
+    });
+
+    // piped rather than inherited so a refusal can be put in a dialog: a shell
+    // launched from a menu has no terminal for the user to read
+    child.stderr.on('data', (chunk) => {
+      const text = String(chunk);
+      process.stderr.write(text);
+      complaint += text;
     });
 
     const timer = setTimeout(() => {
@@ -120,24 +139,273 @@ function startServer() {
     timer.unref?.();
 
     child.on('exit', (code) => {
-      // a refusal to start (a live session, a missing input) is the server's to
-      // explain: it has already said so on stderr
-      if (!settled) reject(new Error(`sqlnow exited with ${code} before it bound a port`));
-      else app.quit();
+      if (!settled) {
+        settled = true;
+        reject(new Error(complaint.trim() || `sqlnow exited with ${code} before it bound a port`));
+      }
     });
     child.on('error', (e) => reject(new Error(`could not run ${serverBinary()}: ${e.message}`)));
   });
 }
 
+/// A window on a session, and the server behind it when we started one.
+function openWindow({ url, child }) {
+  const window = new BrowserWindow({
+    width: 1280,
+    height: 850,
+    title: 'sqlnow',
+    icon: path.join(__dirname, 'icons', 'icon.png'),
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      // the page comes from our own server over HTTP: it needs no node, no
+      // preload and no bridge, so it gets none
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  windows.set(window, { child, url });
+  window.loadURL(url);
+
+  // links to anywhere else belong in the user's browser, not in this window
+  window.webContents.setWindowOpenHandler(({ url: target }) => {
+    shell.openExternal(target);
+    return { action: 'deny' };
+  });
+
+  wireZoom(window);
+
+  window.on('closed', () => {
+    const owned = windows.get(window);
+    windows.delete(window);
+    // SIGTERM is what lets sqlnow record the session as last used and shut the
+    // server down cleanly; a window on someone else's server owns no child
+    owned?.child?.kill('SIGTERM');
+  });
+  // what the menu offers depends on which window is in front
+  window.on('focus', () => buildMenu());
+
+  return window;
+}
+
+/// Start a session and show it. `args` is a command line for the server.
+async function openSession(args) {
+  let started;
+  try {
+    started = await startServer(args);
+  } catch (e) {
+    const message = String(e.message ?? e);
+    // "already open at http://…" is the server refusing to serve one session
+    // twice — and that refusal carries the address we actually want
+    const running = message.match(/already open at (http:\/\/\S+)/);
+    if (running) {
+      showSession(running[1]);
+      return;
+    }
+    dialog.showErrorBox('sqlnow', message);
+    return;
+  }
+  openWindow({ url: started.deepLink ?? started.url, child: started.child });
+  buildMenu();
+}
+
+/// Show a session something else is already serving, starting nothing.
+function showSession(url) {
+  for (const [window, owned] of windows) {
+    if (owned.url.startsWith(url) || url.startsWith(owned.url)) {
+      window.focus();
+      return window;
+    }
+  }
+  const window = openWindow({ url, child: null });
+  buildMenu();
+  return window;
+}
+
+/// The window in front and the server behind it, which is what the menu acts on.
+function current() {
+  const window = BrowserWindow.getFocusedWindow() ?? [...windows.keys()][0];
+  return window ? { window, ...windows.get(window) } : null;
+}
+
+/// Attach files or databases to a running session.
+///
+/// Straight to the endpoint an agent would use, and the page picks the change
+/// up on its own: adding an input bumps the session's change stamp, which the
+/// UI is already listening for. Returns what could not be attached.
+async function attachPaths(url, paths) {
+  const failures = [];
+  for (const uri of paths) {
+    try {
+      const response = await fetch(`${url}/api/inputs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ uri }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        failures.push(`${path.basename(uri)}: ${body.error ?? response.statusText}`);
+      }
+    } catch (e) {
+      failures.push(`${path.basename(uri)}: ${e.message}`);
+    }
+  }
+  return failures;
+}
+
+async function attachData() {
+  const here = current();
+  if (!here) return;
+
+  const picked = await dialog.showOpenDialog(here.window, {
+    title: 'Attach data',
+    buttonLabel: 'Attach',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Data', extensions: ['csv', 'tsv', 'parquet', 'json', 'jsonl', 'ndjson', 'xlsx'] },
+      { name: 'Databases', extensions: ['duckdb', 'ddb', 'db', 'sqlite', 'sqlite3'] },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (picked.canceled || picked.filePaths.length === 0) return;
+
+  const failures = await attachPaths(here.url, picked.filePaths);
+  if (failures.length > 0) {
+    dialog.showErrorBox('Could not attach', failures.join('\n'));
+  }
+}
+
+/// Every session in the store, as the server in front sees them.
+async function storedSessions(url) {
+  try {
+    const response = await fetch(`${url}/api/sessions`);
+    if (!response.ok) return [];
+    const body = await response.json();
+    return body.sessions ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/// How a session reads in a menu: the file it lives in if it has one, else the
+/// inputs it was created for, and how long ago it was used.
+function sessionLabel(session) {
+  const home = app.getPath('home');
+  const short = (where) => (where.startsWith(home) ? `~${where.slice(home.length)}` : where);
+  const what = session.path
+    ? short(session.path)
+    : session.inputs.length > 0
+      ? session.inputs.map(short).join(', ')
+      : '(no inputs recorded)';
+
+  const seconds = session.age_seconds;
+  const age =
+    seconds < 60
+      ? 'just now'
+      : seconds < 3600
+        ? `${Math.floor(seconds / 60)}m ago`
+        : seconds < 86400
+          ? `${Math.floor(seconds / 3600)}h ago`
+          : `${Math.floor(seconds / 86400)}d ago`;
+
+  return `${what}  —  ${age}`;
+}
+
+/// Rebuild the application menu around the window in front.
+///
+/// Rebuilt rather than kept in step, because the session list is a question
+/// for a server and which server that is depends on focus.
+async function buildMenu() {
+  const here = current();
+  const sessions = here ? await storedSessions(here.url) : [];
+
+  const sessionItems = sessions.slice(0, 20).map((session) => ({
+    label: sessionLabel(session),
+    type: 'checkbox',
+    checked: session.current === true,
+    enabled: session.current !== true,
+    // a session already being served is opened on its own address rather than
+    // started again, which the server would refuse anyway
+    click: () => (session.url ? showSession(session.url) : openSession(['--resume', session.id])),
+  }));
+
+  const template = [
+    {
+      label: '&File',
+      submenu: [
+        { id: 'attach', label: 'Attach Data…', accelerator: 'CommandOrControl+O', click: attachData },
+        { id: 'new', label: 'New Session', click: () => openSession([]) },
+        { type: 'separator' },
+        {
+          id: 'browser',
+          label: 'Open in Browser',
+          click: () => here && shell.openExternal(here.window.webContents.getURL()),
+        },
+        { type: 'separator' },
+        { id: 'close', role: 'close', accelerator: 'CommandOrControl+W' },
+        { id: 'quit', role: 'quit', accelerator: 'CommandOrControl+Q' },
+      ],
+    },
+    {
+      label: '&Session',
+      submenu:
+        sessionItems.length > 0 ? sessionItems : [{ label: 'No sessions', enabled: false }],
+    },
+    {
+      label: '&View',
+      submenu: [
+        { role: 'reload', accelerator: 'CommandOrControl+R' },
+        { type: 'separator' },
+        // The keys are wireZoom's, which also takes ctrl+= — an accelerator
+        // would claim only the shifted plus. registerAccelerator: false shows
+        // the shortcut without binding it, so there is one handler, not two.
+        {
+          label: 'Zoom In',
+          accelerator: 'CommandOrControl+Plus',
+          registerAccelerator: false,
+          click: () => zoomBy(1),
+        },
+        {
+          label: 'Zoom Out',
+          accelerator: 'CommandOrControl+-',
+          registerAccelerator: false,
+          click: () => zoomBy(-1),
+        },
+        {
+          label: 'Actual Size',
+          accelerator: 'CommandOrControl+0',
+          registerAccelerator: false,
+          click: () => zoomTo(0),
+        },
+        { type: 'separator' },
+        { role: 'toggleDevTools', accelerator: 'F12' },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/// Zoom the window in front. Levels rather than factors: chromium's own step
+/// is one level, which is a factor of 1.2, and level 0 is 100%.
+function zoomBy(steps) {
+  const here = current();
+  if (!here) return;
+  const contents = here.window.webContents;
+  contents.setZoomLevel(Math.max(-5, Math.min(5, contents.getZoomLevel() + steps)));
+}
+
+function zoomTo(level) {
+  const here = current();
+  if (here) here.window.webContents.setZoomLevel(level);
+}
+
 /// Zoom on the keys a browser uses.
 ///
 /// Electron's default menu binds `CommandOrControl+Plus`, and on most layouts
-/// `+` is the shifted `=` — so Ctrl+Shift+= zoomed and plain Ctrl+= did
+/// `+` is the shifted `=` — so ctrl+shift+= zoomed and plain ctrl+= did
 /// nothing. Chrome accepts both, and its reset accelerator did not reach us
-/// either, so the keys are handled here instead of left to the menu.
-///
-/// Levels rather than factors: chromium's own step is one level, which is a
-/// factor of 1.2, and level 0 is 100%.
+/// either, so the keys are handled here rather than left to a menu.
 function wireZoom(window) {
   const contents = window.webContents;
   const bounded = (level) => Math.max(-5, Math.min(5, level));
@@ -165,68 +433,64 @@ async function main() {
 
   let started;
   try {
-    started = await startServer();
+    started = await startServer(serverArgs());
   } catch (e) {
     console.error(String(e.message ?? e));
     app.exit(1);
     return;
   }
 
-  const window = new BrowserWindow({
-    width: 1280,
-    height: 850,
-    title: 'sqlnow',
-    icon: path.join(__dirname, 'icons', 'icon.png'),
-    backgroundColor: '#ffffff',
-    webPreferences: {
-      // the page comes from our own server over HTTP: it needs no node, no
-      // preload and no bridge, so it gets none
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-    },
-  });
-  window.setMenuBarVisibility(false);
-  window.loadURL(started.url);
+  const window = openWindow({ url: started.deepLink ?? started.url, child: started.child });
+  await buildMenu();
 
-  wireZoom(window);
+  if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK) {
+    window.webContents.once('did-finish-load', () => runChecks(window, started));
+  }
 
-  // links to anywhere else belong in the user's browser, not in this window
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
-    return { action: 'deny' };
-  });
-
-  // A seam for the smoke test: report what loaded and exit, so CI can check
-  // that a real window really does display a real session.
-  if (process.env.SQLNOW_SMOKE) {
-    window.webContents.once('did-finish-load', async () => {
-      const title = await window.webContents.executeJavaScript('document.title');
-      const tables = await window.webContents.executeJavaScript(
-        "fetch('/tables.json', {method: 'POST'}).then(r => r.json()).then(d => d.tables.map(t => t.name).join(','))"
-      );
-      console.log(`SMOKE url=${window.webContents.getURL()} title=${title} tables=${tables}`);
-      started.child.kill('SIGTERM');
+  app.on('window-all-closed', () => app.quit());
+  // a signal aimed at this process should take every server with it
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      for (const owned of windows.values()) owned.child?.kill('SIGTERM');
       app.exit(0);
     });
   }
+}
 
-  // A seam for the zoom test: chromium delivers these to the renderer exactly
-  // as a real key press, so before-input-event sees what a user would send.
-  if (process.env.SQLNOW_ZOOM_CHECK) {
-    window.webContents.once('did-finish-load', async () => {
+/// Seams for the tests: drive what a person would, report, and exit.
+///
+/// Chromium delivers sendInputEvent keys to the renderer exactly as a real
+/// press would, and a menu item can be clicked directly, so all of this goes
+/// through the same path as using it — bar the native file dialog, which
+/// nothing can automate, so the attach is handed the paths it would return.
+async function runChecks(window, started) {
+  const contents = window.webContents;
+  const stop = (code) => {
+    for (const owned of windows.values()) owned.child?.kill('SIGTERM');
+    app.exit(code);
+  };
+
+  try {
+    if (process.env.SQLNOW_SMOKE) {
+      const title = await contents.executeJavaScript('document.title');
+      const tables = await contents.executeJavaScript(
+        "fetch('/tables.json', {method: 'POST'}).then(r => r.json()).then(d => d.tables.map(t => t.name).join(','))"
+      );
+      console.log(`SMOKE url=${contents.getURL()} title=${title} tables=${tables}`);
+    }
+
+    if (process.env.SQLNOW_ZOOM_CHECK) {
       const press = (key, modifiers) =>
         new Promise((done) => {
-          window.webContents.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
-          window.webContents.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
+          contents.sendInputEvent({ type: 'keyDown', keyCode: key, modifiers });
+          contents.sendInputEvent({ type: 'keyUp', keyCode: key, modifiers });
           setTimeout(done, 120);
         });
-      const level = () => window.webContents.getZoomLevel().toFixed(2);
-
+      const level = () => contents.getZoomLevel().toFixed(2);
       // chromium keeps zoom per host in the profile, so a previous run leaves
       // this window already zoomed: start from a known level
       const log = [`start ${level()}`];
-      window.webContents.setZoomLevel(0);
+      contents.setZoomLevel(0);
       for (const [label, key, modifiers] of [
         ['ctrl+=', '=', ['control']],
         ['ctrl+= again', '=', ['control']],
@@ -239,26 +503,31 @@ async function main() {
         log.push(`${label} -> ${level()}`);
       }
       console.log(`ZOOM ${log.join(' | ')}`);
-      started.child.kill('SIGTERM');
-      app.exit(0);
-    });
-  }
+    }
 
-  // closing the window ends the session: SIGTERM is what lets sqlnow record it
-  // as last used and shut the server down cleanly
-  const stopServer = () => started.child.kill('SIGTERM');
-  app.on('window-all-closed', () => {
-    stopServer();
-    app.quit();
-  });
-  app.on('before-quit', stopServer);
-  // a signal aimed at this process should take the server with it too
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => {
-      stopServer();
-      app.exit(0);
-    });
+    if (process.env.SQLNOW_MENU_CHECK) {
+      const menu = Menu.getApplicationMenu();
+      const menus = menu.items.map((item) => item.label).join(',');
+      const listed = menu.items.find((item) => item.label.includes('Session')).submenu.items;
+      const sessions = await storedSessions(started.url);
+
+      // what the dialog would have handed to the attach
+      const failures = await attachPaths(started.url, [process.env.SQLNOW_MENU_CHECK]);
+      const tables = await contents.executeJavaScript(
+        "fetch('/tables.json', {method: 'POST'}).then(r => r.json()).then(d => d.tables.map(t => t.name).sort().join(','))"
+      );
+      console.log(
+        `MENU menus=${menus} sessions=${sessions.length} listed=${listed.length}` +
+          ` current=${listed.filter((item) => item.checked).length}` +
+          ` failures=${failures.length} tables=${tables}`
+      );
+    }
+  } catch (e) {
+    console.error(`CHECK FAILED ${e.message}`);
+    stop(1);
+    return;
   }
+  stop(0);
 }
 
 main();
