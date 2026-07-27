@@ -1,6 +1,6 @@
 [package]
 name = "sqlnow"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 description = "Local SQL viewer for files and databases, with pre-defined queries for LLM-agent workflows"
 license = "MIT"
