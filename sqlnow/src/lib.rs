@@ -612,33 +612,60 @@ fn session_key(views: &[Input], tables: &[Input]) -> String {
     digest(&parts)
 }
 
-/// How long to wait on a session that may not be there any more.
-const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// Is a server still serving this session at `url`?
+/// How long to wait for a session to answer.
 ///
-/// An answer is not enough — a killed process leaves its address behind and
-/// the port may since belong to something else — so the reply has to name the
-/// session we asked about. One plain GET over loopback, which needs no HTTP
-/// client: no TLS, no redirects, no proxies.
-fn ping_session(url: &str, id: &str) -> bool {
+/// Measured on loopback: a healthy server answers in about 7ms, p95 10ms, so
+/// this is five times the headroom it needs. Nothing hangs on the value in the
+/// usual cases either — a port with nothing behind it is refused by the kernel
+/// in microseconds, and a server that is simply busy is not judged by the
+/// clock at all, see [`Liveness`].
+const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// What a ping learned about a published address.
+enum Liveness {
+    /// It answered, and named the session we asked about.
+    Answered,
+    /// Nothing is there: refused, unresolvable, or something else entirely
+    /// answering on a port this session used to have.
+    Gone,
+    /// Something is listening but did not answer in time. Treated as alive.
+    ///
+    /// A server is single-threaded through duckdb, so one long query blocks
+    /// everything else: a six second query means a six second wait for a ping,
+    /// and no timeout is long enough to rule that out. Silence therefore has to
+    /// mean "probably busy" rather than "dead", because being wrong the other
+    /// way withdraws the address of a session someone is using — which would
+    /// let a second server open it and both write over each other.
+    Silent,
+}
+
+/// Ask the server at `url` whether it is still serving this session.
+///
+/// The reply has to name the session, not merely exist: a killed process
+/// leaves its address behind and the port may since belong to something else.
+/// One plain GET over loopback, which needs no HTTP client: no TLS, no
+/// redirects, no proxies.
+fn ping_session(url: &str, id: &str) -> Liveness {
     use std::io::{Read, Write};
 
     let address = match url.strip_prefix("http://") {
         Some(address) => address,
-        None => return false,
+        None => return Liveness::Gone,
     };
     let resolved = match address.to_socket_addrs() {
         Ok(mut addresses) => match addresses.next() {
             Some(address) => address,
-            None => return false,
+            None => return Liveness::Gone,
         },
-        Err(_) => return false,
+        Err(_) => return Liveness::Gone,
     };
     let mut stream = match std::net::TcpStream::connect_timeout(&resolved, PING_TIMEOUT) {
         Ok(stream) => stream,
-        // refused: nothing is listening, so the address is stale
-        Err(_) => return false,
+        // refused means nothing is listening, which is the one answer the
+        // kernel gives immediately and for certain; anything else (a full
+        // backlog, a timeout) is a machine under load, not an empty port
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Liveness::Gone,
+        Err(_) => return Liveness::Silent,
     };
     let _ = stream.set_read_timeout(Some(PING_TIMEOUT));
     let _ = stream.set_write_timeout(Some(PING_TIMEOUT));
@@ -647,22 +674,31 @@ fn ping_session(url: &str, id: &str) -> bool {
         address
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return Liveness::Silent;
     }
     let mut reply = String::new();
-    let _ = stream.take(64 * 1024).read_to_string(&mut reply);
-    reply.contains(id)
+    match stream.take(64 * 1024).read_to_string(&mut reply) {
+        // it spoke: either this session, or something else on a recycled port
+        Ok(_) if reply.contains(id) => Liveness::Answered,
+        Ok(read) if read > 0 => Liveness::Gone,
+        // said nothing in time, or the read failed: assume it is busy
+        _ => Liveness::Silent,
+    }
 }
 
 /// The address of a server currently serving this session, if there is one.
 /// A stale address is cleared as it is found, so it stops being reported.
 fn live_at(store: &Path, id: &str) -> Option<String> {
     let url = session_url(store, id)?;
-    if ping_session(&url, id) {
-        return Some(url);
+    match ping_session(&url, id) {
+        // an address that answers, or one whose server is too busy to answer,
+        // both belong to a session that is still open
+        Liveness::Answered | Liveness::Silent => Some(url),
+        Liveness::Gone => {
+            let _ = set_session_url(store, id, None);
+            None
+        }
     }
-    let _ = set_session_url(store, id, None);
-    None
 }
 
 /// The stored sessions, most recently used first — one connection and one

@@ -284,3 +284,34 @@ fn a_stop_that_arrives_immediately_still_closes_the_session() {
     let age = space.exec_value(&space.store(), "SELECT epoch(now()::TIMESTAMP - last_used)::BIGINT FROM sessions");
     assert!(age.parse::<i64>().unwrap() < 30, "last_used was not touched: {}", age);
 }
+
+#[test]
+fn a_session_too_busy_to_answer_is_still_treated_as_open() {
+    let space = Workspace::new("busy-ping");
+    let csv = space.csv("plants.csv");
+    space.start(&[&csv.to_string_lossy(), "-q", "a=SELECT 1"]).stop();
+
+    // Something listening that never replies, standing in for a server whose
+    // single worker is inside a long query. A ping cannot tell that apart from
+    // a hang, so it must not conclude the session is closed: withdrawing the
+    // address of a session someone is using would let a second server open it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a silent listener");
+    let address = listener.local_addr().unwrap();
+    let id = space.exec_value(&space.store(), "SELECT id FROM sessions");
+    space.exec(
+        &space.store(),
+        &format!("UPDATE sessions SET url = 'http://{}' WHERE id = '{}'", address, id),
+    );
+
+    let listed = space.run_text(&["--resume"]);
+    assert!(listed.contains("is open at"), "a busy session was reported as closed:\n{}", listed);
+
+    // and the address is left alone rather than cleared
+    let kept = space.exec_value(&space.store(), "SELECT coalesce(url, 'CLEARED') FROM sessions");
+    assert_eq!(kept, format!("http://{}", address));
+
+    // a launch onto it is still refused, which is the point of all this
+    let refused = space.run(&[&csv.to_string_lossy(), "--port", "0"]);
+    assert!(!refused.status.success(), "a second server opened a session that looked busy");
+    drop(listener);
+}
