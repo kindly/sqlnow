@@ -1610,6 +1610,13 @@ pub fn serve(app_data: AppData, host: &str, port: u16) -> Result<(Server, Socket
     // losing the session's closing bookkeeping. The signals are handled by the
     // caller instead, from before the address is announced.
     .disable_signals()
+    // The UI holds an SSE stream open for as long as its page is up, and a
+    // graceful shutdown waits for in-flight requests: with the default 30s that
+    // meant a closed window left its server running for half a minute, still
+    // answering pings, so the session could not be reopened. Two seconds is
+    // enough for an ordinary request to finish and short enough that closing
+    // means closed.
+    .shutdown_timeout(2)
     .workers(workers);
 
     let addr = *server

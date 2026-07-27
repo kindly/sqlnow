@@ -315,3 +315,27 @@ fn a_session_too_busy_to_answer_is_still_treated_as_open() {
     assert!(!refused.status.success(), "a second server opened a session that looked busy");
     drop(listener);
 }
+
+#[test]
+fn a_watching_page_does_not_hold_the_server_open() {
+    let space = Workspace::new("shutdown");
+    let csv = space.csv("plants.csv");
+    let server = space.start(&[&csv.to_string_lossy()]);
+
+    // the UI keeps this open for as long as it is on screen, and a graceful
+    // shutdown waits for in-flight requests — which is how closing a window
+    // used to leave its server running for half a minute, still answering
+    // pings, so the session could not be reopened
+    let watching = server.watch_changes(std::time::Duration::from_secs(10));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let stopped = server.wait_for_stop(std::time::Duration::from_secs(15));
+    let took = stopped.expect("the server was still running 15s after being asked to stop");
+    assert!(
+        took < std::time::Duration::from_secs(8),
+        "shutdown waited {:?} for a watching page",
+        took
+    );
+    eprintln!("shutdown with a page watching took {:?}", took);
+    let _ = watching.join();
+}

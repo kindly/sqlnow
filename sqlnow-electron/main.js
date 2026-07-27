@@ -184,6 +184,11 @@ function openWindow({ url, target, child }) {
   window.on('closed', () => {
     const owned = windows.get(window);
     windows.delete(window);
+    console.log(
+      `closing the window on ${owned?.url ?? 'an unknown address'}` +
+        `${owned?.child ? ` and its server (pid ${owned.child.pid})` : ' (its server is not ours)'}` +
+        `; ${windows.size} still open`
+    );
     // SIGTERM is what lets sqlnow record the session as last used and shut the
     // server down cleanly; a window on someone else's server owns no child
     owned?.child?.kill('SIGTERM');
@@ -383,8 +388,16 @@ async function buildMenu() {
         { type: 'separator' },
         { id: 'new', label: 'New Session', click: () => openSession([]) },
         { type: 'separator' },
-        { id: 'close', role: 'close', accelerator: 'CommandOrControl+W' },
-        { id: 'quit', role: 'quit', accelerator: 'CommandOrControl+Q' },
+        // Electron hands the click the window its menu belongs to. The `close`
+        // role instead acts on whatever it considers focused, which on a
+        // tiling desktop is not reliably the window you clicked in.
+        {
+          id: 'close',
+          label: 'Close Session',
+          accelerator: 'CommandOrControl+W',
+          click: (_item, from) => (from ?? current()?.window)?.close(),
+        },
+        { id: 'quit', label: 'Quit', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
       ],
     },
     {
@@ -484,7 +497,8 @@ async function main() {
   const window = openWindow({ url: started.url, target: started.deepLink, child: started.child });
   await buildMenu();
 
-  if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK) {
+  if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK
+      || process.env.SQLNOW_WINDOW_CHECK) {
     window.webContents.once('did-finish-load', () => runChecks(window, started));
   }
 
@@ -544,6 +558,46 @@ async function runChecks(window, started) {
         log.push(`${label} -> ${level()}`);
       }
       console.log(`ZOOM ${log.join(' | ')}`);
+    }
+
+    if (process.env.SQLNOW_WINDOW_CHECK) {
+      const pidOf = (win) => windows.get(win)?.child?.pid;
+      const alive = (pid) => {
+        try { process.kill(pid, 0); return true; } catch { return false; }
+      };
+      const settle = () => new Promise((done) => setTimeout(done, 2500));
+
+      // a second session, the way the Session menu opens one
+      await openSession([process.env.SQLNOW_WINDOW_CHECK]);
+      await settle();
+      const [first, second] = [...windows.keys()];
+      const firstServer = pidOf(first);
+      const secondServer = pidOf(second);
+
+      // close it the way File > Close does: the menu item, on the window in
+      // front, rather than by calling close() on a window we picked ourselves
+      first.focus();
+      await new Promise((done) => setTimeout(done, 300));
+      const closeItem = Menu.getApplicationMenu()
+        .items.find((item) => item.label.includes('File'))
+        .submenu.items.find((item) => item.id === 'close');
+      closeItem.click(undefined, first);
+      // how long the server behind it takes to go: graceful shutdown waits for
+      // in-flight requests, and the page holds an SSE stream open
+      const closedAt = Date.now();
+      let took = null;
+      for (let i = 0; i < 80; i++) {
+        if (!alive(firstServer)) { took = Date.now() - closedAt; break; }
+        await new Promise((done) => setTimeout(done, 500));
+      }
+
+      console.log(`SHUTDOWN closed_server_gone_after=${took === null ? 'over 40s' : took + 'ms'}`);
+      console.log(
+        `WINDOWS left=${windows.size}` +
+          ` closed_server_alive=${alive(firstServer)}` +
+          ` other_server_alive=${alive(secondServer)}` +
+          ` other_window_open=${!second.isDestroyed()}`
+      );
     }
 
     if (process.env.SQLNOW_MENU_CHECK) {

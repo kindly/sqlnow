@@ -419,6 +419,28 @@ impl Server {
             .collect()
     }
 
+    /// Ask it to stop and time how long it takes to go.
+    pub fn wait_for_stop(mut self, within: Duration) -> Option<Duration> {
+        let started = Instant::now();
+        #[cfg(unix)]
+        unsafe {
+            libc_kill(self.child.id() as i32, 15);
+        }
+        let deadline = started + within;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    let took = started.elapsed();
+                    std::mem::forget(self);
+                    return Some(took);
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
+        None
+    }
+
     /// Wait for it to exit on its own, returning how long that took.
     pub fn wait_for_exit(mut self, within: Duration) -> Option<Duration> {
         let started = Instant::now();
