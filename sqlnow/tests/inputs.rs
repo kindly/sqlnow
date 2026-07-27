@@ -66,3 +66,19 @@ fn a_json_file_with_multibyte_text_loads() {
     assert_eq!(server.tables(), ["wide"]);
     assert_eq!(server.query("SELECT count(*) FROM wide")["table_data"]["rows"][0][0], "2");
 }
+
+#[test]
+fn a_url_without_a_name_is_refused_clearly() {
+    let space = Workspace::new("unnamed-url");
+
+    // A database url used to reach duckdb with an empty name, which came back
+    // as "Parser Error: zero-length delimited identifier" — true, and no help
+    // at all. There is no postgres in the test environment, so this checks the
+    // naming rather than the connecting: a url with no database in its path
+    // cannot be named after one, and has to say so.
+    let out = space.run(&["-v", "postgresql://localhost", "--port", "0"]);
+    let complaint = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(complaint.contains("needs a name"), "{}", complaint);
+    assert!(!complaint.contains("zero-length"), "the parser error leaked out: {}", complaint);
+}

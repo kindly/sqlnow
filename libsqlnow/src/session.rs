@@ -1032,34 +1032,79 @@ pub fn input_into_parts(input: &str) -> Result<Input> {
 }
 
 pub fn default_name_and_check(input: &mut Input) -> Result<()> {
-    let local = input.uri.ends_with(".parquet")
-        || input.uri.ends_with(".csv")
-        || input.uri.ends_with(".db")
-        || input.uri.ends_with(".sqlite")
-        || input.uri.ends_with(".duckdb")
-        || input.uri.ends_with(".ddb")
-        || input.uri.starts_with("sqlite://");
-    if !local {
+    // A database somewhere else — postgres, mysql — is named after the
+    // database itself. Without this the name stayed empty and the attach was
+    // built as `AS ""`, which duckdb rejects with a parser error about a
+    // zero-length identifier: true, and no help at all.
+    if is_remote_database(&input.uri) {
+        if input.name.is_empty() {
+            input.name = name_from_uri(&input.uri).ok_or_else(|| {
+                eyre::eyre!(
+                    "{} does not say which database to open, so it needs a name of its own \
+                     (--as <name>, or \"name\" over the API)",
+                    input.uri
+                )
+            })?;
+        }
         return Ok(());
+    }
+
+    // Anything else with a scheme is a file somewhere we cannot stat: s3, gcs,
+    // a parquet over https. Name it after the file, and let the attach report
+    // whether it is really there.
+    if let Some((_, rest)) = input.uri.split_once("://") {
+        if !input.uri.starts_with("sqlite://") {
+            if input.name.is_empty() {
+                input.name = name_from_uri(rest).ok_or_else(|| {
+                    eyre::eyre!("{} needs a name of its own (--as <name>)", input.uri)
+                })?;
+            }
+            return Ok(());
+        }
     }
 
     let path = input.uri.strip_prefix("sqlite://").unwrap_or(&input.uri);
     let path_buf = PathBuf::from(path);
 
-    if !input.uri.starts_with("s3://") && !path_buf.exists() {
+    if !path_buf.exists() {
         return Err(eyre::eyre!("File {} does not exist", path));
     }
 
     if input.name.is_empty() {
-        let mut name = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
-        // duckdb reserves these as attached database names
-        if ["main", "system", "temp"].contains(&name.as_str()) {
-            name = format!("{}_db", name);
-        }
-        input.name = name;
+        let stem = path_buf.file_stem().expect("is file").to_string_lossy().to_string();
+        input.name = reserved_safe(stem);
     }
 
     Ok(())
+}
+
+/// A database served by something else, which duckdb attaches over the network.
+fn is_remote_database(uri: &str) -> bool {
+    ["postgresql://", "postgres://", "mysql://", "mariadb://"]
+        .iter()
+        .any(|scheme| uri.starts_with(scheme))
+}
+
+/// The last useful word of a URI: the database for a server, the file stem for
+/// a file. Query strings, fragments, ports and credentials are not part of it.
+fn name_from_uri(uri: &str) -> Option<String> {
+    let without_scheme = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    let path = without_scheme.split(['?', '#']).next()?;
+    let last = path.rsplit('/').find(|part| !part.is_empty())?;
+    // a host is not a name: postgresql://localhost has no database in it
+    if !path.contains('/') {
+        return None;
+    }
+    let stem = last.split('.').next().filter(|part| !part.is_empty())?;
+    Some(reserved_safe(stem.to_string()))
+}
+
+/// duckdb keeps these for itself, so a file called main.csv gets main_db.
+fn reserved_safe(name: String) -> String {
+    if ["main", "system", "temp"].contains(&name.as_str()) {
+        return format!("{}_db", name);
+    }
+    name
 }
 
 pub fn local_db_path(uri: &str) -> Option<String> {
@@ -1337,6 +1382,35 @@ mod tests {
         assert_eq!(q2.name, "query 2");
         session.delete_query("query 1").unwrap();
         assert_eq!(session.create_query(None, "").unwrap().name, "query 1");
+    }
+
+    #[test]
+    fn a_database_url_is_named_after_its_database() {
+        let named = |uri: &str| {
+            let mut input = Input {
+                name: String::new(),
+                uri: uri.to_string(),
+                tables: vec![],
+                except: vec![],
+            };
+            default_name_and_check(&mut input).map(|_| input.name)
+        };
+
+        // the attach used to be built as `AS ""`, which duckdb rejects with a
+        // parser error about a zero-length identifier
+        assert_eq!(named("postgresql://localhost:5432/gemlive").unwrap(), "gemlive");
+        assert_eq!(named("postgres://user:pw@host:5432/gem_live").unwrap(), "gem_live");
+        assert_eq!(named("mysql://host/shop?ssl=true").unwrap(), "shop");
+
+        // a file somewhere we cannot stat is named after the file, and not
+        // rejected for failing to exist locally
+        assert_eq!(named("https://example.com/data/plants.parquet").unwrap(), "plants");
+        assert_eq!(named("s3://bucket/keys/units.csv").unwrap(), "units");
+
+        // and a url with no database in it says so, rather than failing later
+        // with something about identifiers
+        let complaint = named("postgresql://localhost").unwrap_err().to_string();
+        assert!(complaint.contains("needs a name"), "{}", complaint);
     }
 
     #[test]
