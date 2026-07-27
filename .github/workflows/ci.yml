@@ -89,6 +89,20 @@ jobs:
           xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee live.log
           grep -q 'LIVE after=6000ms server_alive=true page_can_reach_it=true' live.log
 
+      - name: Switching a window to another session
+        working-directory: sqlnow-electron
+        env:
+          SQLNOW_BIN: ${{ github.workspace }}/target/debug/sqlnow
+          SQLNOW_SWITCH_CHECK: '1'
+        # the new server starts before the old one stops, so a session that
+        # cannot be opened leaves the window on what it was showing
+        run: |
+          printf 'e,f\n5,6\n' > switchto.csv
+          "$SQLNOW_BIN" switchto.csv --port 0 & sleep 5; kill %1 || true
+          sleep 3
+          xvfb-run --auto-servernum ./node_modules/electron/dist/electron . plants.csv | tee switch.log
+          grep -q 'SWITCH windows=1 address_changed=true old_server_stopped=true reachable=true' switch.log
+
       - name: A session whose address is stale
         working-directory: sqlnow-electron
         env:

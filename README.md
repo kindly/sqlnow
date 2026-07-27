@@ -40,8 +40,10 @@ one item per kind: **Create View over File…** leaves the data where it is and
 reads it on each query, **Load File as Table…** copies it into the database
 once, and **Attach Database…** takes a duckdb or sqlite file whole, its tables
 appearing under its name. **New Session** starts an empty one. The **Session**
-menu lists everything `sqlnow --resume` would, opening each in its own window —
-or focusing the window that already has it, since a session is served once.
+menu lists what `sqlnow --resume` would, twenty at a time: picking one puts it
+in the window you are in, and the **Open in a New Window** submenu offers the
+same list for a window of its own. Either way it goes through the launcher, so
+a session already being served is shown where it is rather than opened twice.
 Each window owns the server behind it, so closing one stops that session and
 leaves the others alone. There is a Close and a Quit in there too, which
 matters on desktops that draw no window decorations.

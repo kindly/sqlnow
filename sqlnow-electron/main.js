@@ -29,6 +29,10 @@ const STARTUP_MS = Number(process.env.SQLNOW_STARTUP_MS ?? 60_000);
 /// after it, so the window waits this long for the second one.
 const DEEP_LINK_MS = 150;
 
+/// How many sessions the menu offers. The rest stay reachable by id from the
+/// command line, the same way `sqlnow --resume` lists a page and no more.
+const SESSIONS_LISTED = 20;
+
 /// Switches that belong to electron or chromium rather than to sqlnow.
 ///
 /// The two share one command line, so anything a user passes for the window —
@@ -230,6 +234,36 @@ async function openSession(args) {
   buildMenu();
 }
 
+/// Put another session in a window that already exists.
+///
+/// The new server is started before the old one is stopped, so a session that
+/// cannot be opened — one already being served elsewhere, an input that has
+/// gone — leaves the window on what it was showing rather than emptying it.
+async function switchSession(window, args) {
+  const previous = windows.get(window);
+
+  let started;
+  try {
+    started = await startServer(args);
+  } catch (e) {
+    const message = String(e.message ?? e);
+    const running = message.match(/already open at (http:\/\/\S+)/);
+    if (running) {
+      showSession(running[1]);
+    } else {
+      dialog.showErrorBox('sqlnow', message);
+    }
+    return;
+  }
+
+  windows.set(window, { child: started.child, url: started.url });
+  window.loadURL(started.deepLink ?? started.url);
+  // only now, so the window is never pointed at a server that has been asked
+  // to stop. A window showing someone else's session owns no child.
+  previous?.child?.kill('SIGTERM');
+  buildMenu();
+}
+
 /// Show a session something else is already serving, starting nothing.
 function showSession(url) {
   for (const [window, owned] of windows) {
@@ -373,7 +407,8 @@ async function buildMenu() {
   const here = current();
   const sessions = here ? await storedSessions(here.url) : [];
 
-  const sessionItems = sessions.slice(0, 20).map((session) => ({
+  const offered = sessions.slice(0, SESSIONS_LISTED);
+  const entry = (session, open) => ({
     label: sessionLabel(session),
     type: 'checkbox',
     checked: session.current === true,
@@ -384,8 +419,13 @@ async function buildMenu() {
     // opens a window on a dead port, which is a blank page. If the session
     // really is being served the launcher refuses and says where, and that
     // address has just been proven.
-    click: () => openSession(['--resume', session.id]),
-  }));
+    click: () => open(['--resume', session.id]),
+  });
+
+  const switchItems = offered.map((session) =>
+    entry(session, (args) => here && switchSession(here.window, args))
+  );
+  const windowItems = offered.map((session) => entry(session, openSession));
 
   const template = [
     {
@@ -417,7 +457,17 @@ async function buildMenu() {
     {
       label: '&Session',
       submenu:
-        sessionItems.length > 0 ? sessionItems : [{ label: 'No sessions', enabled: false }],
+        offered.length > 0
+          ? [
+              { label: 'Open in this window', enabled: false },
+              ...switchItems,
+              { type: 'separator' },
+              {
+                label: 'Open in a New Window',
+                submenu: windowItems,
+              },
+            ]
+          : [{ label: 'No sessions', enabled: false }],
     },
     {
       label: '&View',
@@ -513,7 +563,7 @@ async function main() {
 
   if (process.env.SQLNOW_SMOKE || process.env.SQLNOW_ZOOM_CHECK || process.env.SQLNOW_MENU_CHECK
       || process.env.SQLNOW_WINDOW_CHECK || process.env.SQLNOW_LIVE_CHECK
-      || process.env.SQLNOW_STALE_CHECK) {
+      || process.env.SQLNOW_STALE_CHECK || process.env.SQLNOW_SWITCH_CHECK) {
     window.webContents.once('did-finish-load', () => runChecks(window, started));
   }
 
@@ -589,6 +639,30 @@ async function runChecks(window, started) {
         "fetch('/api/session').then(r => r.ok).catch(() => false)"
       );
       console.log(`LIVE after=${wait}ms server_alive=${alive} page_can_reach_it=${answered}`);
+    }
+
+    if (process.env.SQLNOW_SWITCH_CHECK) {
+      const before = windows.get(window);
+      const menu = Menu.getApplicationMenu().items.find((m) => m.label.includes('Session')).submenu;
+      const shape = menu.items.map((i) => (i.type === 'separator' ? '|' : i.label)).join(',');
+      // the first offered session in the top list, which replaces this window
+      const item = menu.items.find((i) => i.type === 'checkbox' && i.enabled);
+      item.click();
+      await new Promise((done) => setTimeout(done, 6000));
+
+      const after = windows.get(window);
+      const oldGone = (() => {
+        try { process.kill(before.child.pid, 0); return false; } catch { return true; }
+      })();
+      const reachable = await window.webContents.executeJavaScript(
+        "fetch('/api/session').then(r => r.ok).catch(() => false)"
+      );
+      const nested = menu.items.find((i) => i.label.includes('New Window'));
+      console.log(
+        `SWITCH windows=${windows.size} address_changed=${before.url !== after.url}` +
+          ` old_server_stopped=${oldGone} reachable=${reachable}` +
+          ` nested_list=${nested ? nested.submenu.items.length : 0} shape=${shape}`
+      );
     }
 
     if (process.env.SQLNOW_STALE_CHECK) {
