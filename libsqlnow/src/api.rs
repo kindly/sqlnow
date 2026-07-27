@@ -21,6 +21,7 @@ pub fn configure(service_config: &mut ServiceConfig) {
         .service(delete_query)
         .service(list_history)
         .service(describe_session)
+        .service(list_stored_sessions)
         .service(list_inputs)
         .service(create_input)
         .service(delete_input)
@@ -189,6 +190,45 @@ async fn describe_session(app_data: web::Data<AppData>) -> HttpResponse {
         },
         |body| HttpResponse::Ok().json(body),
     )
+}
+
+/// Every session in the store, most recently used first — what
+/// `sqlnow --resume` lists, for anything that wants to offer a way into
+/// another one.
+///
+/// `url` is what a server published when it opened that session, and is a
+/// claim rather than proof: a process killed outright leaves its address
+/// behind. Ping it (GET /api/session, which answers with the id) before
+/// believing it. The session being served here is marked `current`.
+#[get("/api/sessions")]
+async fn list_stored_sessions(app_data: web::Data<AppData>) -> HttpResponse {
+    let store = match &app_data.store {
+        Some(store) => store,
+        // no store means nothing else to offer: an unregistered run, or a
+        // machine with no writable config directory
+        None => return HttpResponse::Ok().json(serde_json::json!({ "sessions": [] })),
+    };
+    let here = app_data.session.lock().ok().map(|session| session.id().to_string());
+
+    let sessions = match crate::list_sessions(store) {
+        Ok(sessions) => sessions,
+        Err(e) => return HttpResponse::InternalServerError().body(e.to_string()),
+    };
+    let listed: Vec<serde_json::Value> = sessions
+        .iter()
+        .map(|session| {
+            serde_json::json!({
+                "id": session.id,
+                "path": session.path,
+                "inputs": session.inputs,
+                "queries": session.queries,
+                "age_seconds": session.age_seconds,
+                "url": session.url,
+                "current": Some(&session.id) == here.as_ref(),
+            })
+        })
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({ "sessions": listed }))
 }
 
 /// The inputs this session will replay on its next launch.

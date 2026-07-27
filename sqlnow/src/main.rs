@@ -1,5 +1,5 @@
 use eyre::Result;
-use sqlnow::{parse_args, prepare, query_url, run_immediate, serve};
+use sqlnow::{parse_args, prepare, query_url, run_immediate, serve, stop_on_signals};
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -15,6 +15,10 @@ async fn main() -> Result<()> {
     // must not print "Server running" or open a browser tab at a dead URL
     let host = prepared.host.clone();
     let (server, addr) = serve(prepared.app_data, &host, prepared.port.unwrap_or(8080))?;
+
+    // before anything is announced: a stop that arrives immediately must still
+    // find a handler, or the session is never recorded as closed
+    stop_on_signals(&server);
 
     let base_url = format!("http://{}:{}", host, addr.port());
     // the port is only known now, so this is where the session becomes findable

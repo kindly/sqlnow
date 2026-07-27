@@ -1411,6 +1411,7 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
         all_text: cli.text,
         tables: tables.clone(),
         scope,
+        store: store_path(),
     };
 
     let session = Arc::new(Mutex::new(session));
@@ -1517,6 +1518,38 @@ extern "C" {
     fn process_exists(pid: i32, sig: i32) -> i32;
 }
 
+/// Stop the server on the signals a terminal or a desktop shell sends.
+///
+/// Installed before the address is printed, so there is no window in which a
+/// prompt Ctrl-C or SIGTERM kills the process before anything is listening for
+/// it. Graceful, so in-flight requests finish and the caller still reaches the
+/// code that records the session as closed.
+pub fn stop_on_signals(server: &Server) {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    // Registered here rather than inside the spawned task: `signal()` installs
+    // the handler as it is called, while a task on this single-threaded runtime
+    // would not run until the caller next awaits — which is after the address
+    // has been printed, and a stop arriving in between would kill the process
+    // with nothing listening.
+    let (mut term, mut interrupt) = match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+        (Ok(term), Ok(interrupt)) => (term, interrupt),
+        _ => {
+            eprintln!("note: could not listen for stop signals; the session may not be recorded as closed");
+            return;
+        }
+    };
+
+    let handle = server.handle();
+    actix_web::rt::spawn(async move {
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+        handle.stop(true).await;
+    });
+}
+
 /// Bind the HTTP server and return it alongside the address it actually got.
 /// Binding happens before the server is awaited so callers can fail loudly on
 /// a taken port instead of announcing a URL that does not answer, and so a
@@ -1535,6 +1568,12 @@ pub fn serve(app_data: AppData, host: &str, port: u16) -> Result<(Server, Socket
     })
     .bind((host, port))
     .map_err(|e| eyre::eyre!("Could not bind http://{}:{}: {}", host, port, e))?
+    // Actix registers its own SIGTERM handler when the server future is first
+    // polled, which is after the address has been printed — and anything that
+    // starts sqlnow and stops it in that window killed the process outright,
+    // losing the session's closing bookkeeping. The signals are handled by the
+    // caller instead, from before the address is announced.
+    .disable_signals()
     .workers(workers);
 
     let addr = *server

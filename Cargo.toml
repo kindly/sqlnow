@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 actix-web = "4.3.1"
-tokio = { version = "1.28.2", features = ["time"] }
+tokio = { version = "1.28.2", features = ["time", "signal"] }
 clap = { version = "4.3.8", features = ["derive"] }
 eyre = "0.6.8"
 serde = { version = "1.0.169", features = ["derive"] }

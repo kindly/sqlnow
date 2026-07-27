@@ -102,6 +102,9 @@ pub struct Config {
     pub all_text:bool,
     /// id used to scope browser-side state (query history) to this session
     pub scope: Option<String>,
+    /// The session store this run belongs to, when there is one. Passed
+    /// through so the server can answer what other sessions exist.
+    pub store: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +198,11 @@ pub struct AppData {
     /// From --text: how a later input is attached. Startup configuration
     /// rather than derived state, so it cannot disagree with anything.
     pub all_text: bool,
+    /// The session store, when this run has one: where every session that is
+    /// not anchored to a file of its own lives, and the index of the ones that
+    /// are. Only needed to answer "what else could I open", so `None` simply
+    /// means that question has no answer here.
+    pub store: Option<std::path::PathBuf>,
     /// The session sidecar store (queries, history, inputs). The mutex
     /// serializes this server's own sidecar operations; the state itself
     /// lives in the sidecar database.
@@ -288,6 +296,7 @@ pub fn get_app_data(config: Config, session: Arc<std::sync::Mutex<Session>>) -> 
         })),
         db: db,
         all_text: config.all_text,
+        store: config.store,
         session,
         session_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     })
@@ -949,6 +958,7 @@ mod tests {
                 drop: false,
                 all_text: false,
                 scope: None,
+                store: None,
             },
             Arc::new(std::sync::Mutex::new(session)),
         )

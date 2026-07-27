@@ -264,3 +264,23 @@ fn a_server_stops_when_the_shell_that_started_it_is_killed() {
     let stopped = server.wait_for_exit(std::time::Duration::from_secs(20));
     assert!(stopped.is_some(), "the server outlived the process it was watching");
 }
+
+#[test]
+fn a_stop_that_arrives_immediately_still_closes_the_session() {
+    let space = Workspace::new("prompt-stop");
+    let csv = space.csv("plants.csv");
+
+    // stopped the instant it says it is listening, which is what a shell does
+    // when its window is closed straight away — and what the harness does every
+    // time. Actix registers its own handlers only when the server future is
+    // first polled, so a stop landing before that killed the process outright
+    // and none of the closing bookkeeping ran.
+    space.start(&[&csv.to_string_lossy()]).stop();
+
+    let url = space.exec_value(&space.store(), "SELECT coalesce(url, 'CLEARED') FROM sessions");
+    assert_eq!(url, "CLEARED", "the address was left behind, so the session still looks live");
+
+    // and the run is recorded as used, which is the other half of closing
+    let age = space.exec_value(&space.store(), "SELECT epoch(now()::TIMESTAMP - last_used)::BIGINT FROM sessions");
+    assert!(age.parse::<i64>().unwrap() < 30, "last_used was not touched: {}", age);
+}

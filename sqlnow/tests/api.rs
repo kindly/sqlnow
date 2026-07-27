@@ -164,3 +164,32 @@ fn the_page_is_served_with_the_session_it_belongs_to() {
         .expect("the page references a script");
     assert_eq!(server.status(asset), 200, "{} is missing from the binary", asset);
 }
+
+#[test]
+fn a_server_can_list_the_other_sessions() {
+    let space = Workspace::new("session-list");
+    let one = space.csv("one.csv").to_string_lossy().to_string();
+    let two = space.write("two.csv", "name,mw\nUnit 1,50\n").to_string_lossy().to_string();
+
+    // an older session to find, then the one doing the looking
+    space.start(&[&one, "-q", "a=SELECT 1"]).stop();
+    let server = space.start(&[&two]);
+
+    let listed = server.get("/api/sessions");
+    let sessions = listed["sessions"].as_array().expect("an array");
+    assert_eq!(sessions.len(), 2, "{}", listed);
+
+    // the one being served says so, and the other does not
+    let here = server.get("/api/session")["id"].as_str().unwrap().to_string();
+    let current: Vec<&serde_json::Value> =
+        sessions.iter().filter(|s| s["current"] == true).collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0]["id"], here);
+
+    // enough to offer a way in: what it holds, and where it was last served
+    let other = sessions.iter().find(|s| s["current"] == false).unwrap();
+    assert_eq!(other["queries"], 1);
+    assert!(other["inputs"][0].as_str().unwrap().ends_with("one.csv"), "{}", other);
+    assert!(other["url"].is_null(), "a closed session should claim no address: {}", other);
+    assert!(sessions[0]["age_seconds"].as_i64().unwrap() >= 0);
+}
