@@ -6,7 +6,15 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
+    // outDir is outside the vite root, so vite will not empty it: without this
+    // every build leaves the previous build's hashed bundles behind.
     outDir: '../libsqlnow/static/',
+    emptyOutDir: true,
+  },
+  test: {
+    environment: 'jsdom',
+    setupFiles: ['./src/test-setup.js'],
+    include: ['src/**/*.test.js'],
   },
   server: {
     proxy: {
