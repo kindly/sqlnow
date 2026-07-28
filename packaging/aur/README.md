@@ -1,28 +1,56 @@
 # AUR packaging
 
-One package: `sqlnow-bin`, repackaging the GitHub release binaries.
+Two packages, both repackaging the GitHub release artifacts:
+
+- `sqlnow-bin` — the command-line server, from the linux `.tar.gz`.
+- `sqlnow-desktop-bin` — the window version, unpacked from the AppImage so it
+  needs no FUSE at runtime.
+
 (A from-source PKGBUILD existed briefly — see git history — but the bundled
 DuckDB compile makes source installs slow for no benefit, so it was dropped.)
 
-## Publishing / updating
+The copies in this directory are **for the record, not the source of truth**:
+edits happen in the AUR clones, and these are refreshed from them at release
+time. The `sqlnow-bin` copy here once sat seven versions behind and had missed
+an `options=('!strip' '!debug')` fix entirely, which is why the direction is
+written down this way now.
+
+## Per release
+
+The clones live outside this repo (gitignored at the root as `sqlnow-bin/` and
+`sqlnow-desktop-bin/`), one per package. In each:
 
 ```bash
-git clone ssh://aur@aur.archlinux.org/sqlnow-bin.git   # empty on first clone
-cd sqlnow-bin
-cp path/to/repo/packaging/aur/sqlnow-bin/PKGBUILD .
-makepkg -f --clean                 # verify it builds
-makepkg --printsrcinfo > .SRCINFO  # required; AUR reads metadata from this
+# 1. bump pkgver, reset pkgrel=1
+# 2. refresh the checksums against the new release files
+updpkgsums                          # or sha256sum the downloads yourself
+# 3. verify it builds, and look inside the result
+makepkg -f --clean
+tar --zstd -tvf *.pkg.tar.zst
+# 4. regenerate the metadata the AUR actually reads
+makepkg --printsrcinfo > .SRCINFO
+# 5. publish
 git add PKGBUILD .SRCINFO
-git commit -m "0.3.0"
-git push origin HEAD:master        # AUR only accepts the master branch!
+git commit -m "0.4.7"
+git push origin HEAD:master         # AUR only accepts the master branch!
 ```
 
-Per release:
+Then copy both PKGBUILDs back into this directory so the repo records what
+shipped.
 
-1. Bump `pkgver`, reset `pkgrel=1` in the PKGBUILD here.
-2. Refresh `sha256sums_*` against the new release tarballs (`updpkgsums`,
-   or sha256sum the downloaded files).
-3. Copy to the AUR clone, rebuild, regenerate `.SRCINFO`, commit, push.
+## Worth checking in the built package
+
+Cheap, and each has been wrong at least once:
+
+- `sqlnow --version` from the packaged binary matches the tag.
+- `--agents-help` output equals the repo's `AGENTS.md` — it is compiled in, so
+  a stale build ships stale instructions.
+- **desktop only:** `chrome-sandbox` is `-rwsr-xr-x`. Without the setuid bit
+  Chromium's fallback sandbox cannot start where unprivileged user namespaces
+  are disabled.
+- **desktop only:** `usr/lib/sqlnow-desktop-bin/` is `drwxr-xr-x`.
+  `--appimage-extract` unpacks 0700 directories and `cp -a` copies that
+  faithfully, so installed as root nothing else could traverse them.
 
 ## Gotchas learned the hard way
 
@@ -30,3 +58,5 @@ Per release:
   either rename (`git branch -m main master`) or push `HEAD:master`.
 - **`.SRCINFO` must be regenerated on every change** — the AUR site reads it,
   not the PKGBUILD.
+- `updpkgsums` comes from `pacman-contrib`, which is not always installed;
+  `sha256sum` on the downloaded files does the same job.
