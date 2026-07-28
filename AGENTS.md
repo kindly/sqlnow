@@ -357,7 +357,102 @@ History is uncapped and deduplicated: rerunning identical SQL refreshes its
 timestamp instead of adding a row, so it is a complete record of everything
 tried. Failed queries are recorded too.
 
-## 6. Constraints
+## 6. Styling what the user sees
+
+Colour, width and row height come from the result itself: name a companion
+column after the column it describes and the grid uses it and hides it. There
+is nothing to configure and nothing stored — it is in the SQL, so it travels
+with the query and you can add it with a `PUT`.
+
+| column | applies to | read from | example |
+|---|---|---|---|
+| `_sqlnow_format_<col>` | each cell of `<col>` | every row | `warn`, `heat:0.7` |
+| `_sqlnow_cell_<col>` | each cell of `<col>` | every row | `{"kind":"bar","value":0.7}` |
+| `_sqlnow_column_<col>` | the column `<col>` | the first row | `width:420; wrap` |
+| `_sqlnow_row_height` | each row | every row | `56` |
+
+```sql
+SELECT p.name,
+       p.notes,
+       p.co2,
+       -- what changed since last week, and how big this number is
+       CASE WHEN p.co2 IS DISTINCT FROM old.co2 THEN 'changed' END AS _sqlnow_format_name,
+       (p.co2 - min(p.co2) OVER ()) /
+         nullif(max(p.co2) OVER () - min(p.co2) OVER (), 0) AS _sqlnow_format_co2,
+       'width:420; wrap' AS _sqlnow_column_notes,
+       56 AS _sqlnow_row_height
+FROM plants p LEFT JOIN plants_last_week old USING (name)
+```
+
+A style is one word, or `;`-separated declarations:
+
+| value | means |
+|---|---|
+| `ok` `added` `warn` `changed` `error` `removed` `muted` | a named background |
+| `0.73` | position on a light-to-dark ramp — a heatmap |
+| `#2d5016`, `rgba(255,0,0,.15)`, `oklch(.7 .15 20)` | that colour as the background |
+| `heat:0.73` / `div:-0.4` | the ramp explicitly; `div` is signed, 0 neutral |
+| `bg:` `fg:` `bold` `italic` `align:left\|right\|center` | set one thing at a time |
+| `width:<px>` `wrap` | column only |
+
+Text colour is chosen for contrast against whatever background you set, so a
+raw colour stays readable in both themes. Prefer the names and the ramps: they
+are picked per theme, a raw colour is not.
+
+### Cells that are not text
+
+A string styles a cell; **JSON says what the cell is**. `_sqlnow_cell_<col>` takes
+an object whose `kind` picks one of these, and `to_json` over a struct is the
+easiest way to build it:
+
+| kind | payload | shows |
+|---|---|---|
+| `bar` | `value`, and `min`/`max` (default 0–1), `label` | a filled bar in the cell |
+| `sparkline` | `values` (a list), `graph` = `line`\|`bar`\|`area`, `color` | the shape of a series |
+| `tags` | `tags` (a list) | coloured pills, one per tag |
+| `link` | `href`, `text` | a clickable link |
+| `bool` | `value` | a checkbox |
+| `bubble` | `tags` (a list) | plain pills, no colour |
+
+```sql
+SELECT p.name,
+       '' AS capacity,          -- the cell's own value is unused when a kind is set
+       '' AS units,
+       to_json({'kind': 'bar', 'value': mw / max(mw) OVER (),
+                'label': round(mw / 1000, 1)::text || ' GW'})   AS _sqlnow_cell_capacity,
+       to_json({'kind': 'sparkline', 'values': unit_mw,
+                'graph': 'bar'})                                AS _sqlnow_cell_units
+FROM plants p
+```
+
+The styling keys work here too — `bg`, `fg`, `bold`, `italic`, `align` — so one
+column can be both a kind and a colour: `{"kind":"bar","value":0.4,"bg":"warn"}`.
+Cells are read-only; nothing in the grid edits.
+
+An unknown `kind`, a missing `kind`, or malformed JSON all fall back to showing
+the column's own text, so a spec you got wrong looks plain rather than failing.
+That is also how a newer kind degrades on an older binary.
+
+The prefix `_sqlnow_` is reserved. Any column using it is an instruction to the
+viewer rather than data, so it is hidden from the grid **and from every export**
+— csv, tab, jsonl and `sqlnow sql` alike:
+
+```bash
+# what the user sees is styled; what they download is only the data
+curl -s -d "sql=SELECT 1 AS co2, 'warn' AS _sqlnow_format_co2" -d csv=1 localhost:8080/outputs
+# -> co2
+#    1
+```
+
+Three things to get right. `<col>` must match the displayed column's name, and
+DuckDB lowercases unquoted aliases (`AS _sqlnow_format_CO2` names the column
+`_sqlnow_format_co2`, which finds `co2`) — quote the alias if the column has
+capitals. `wrap` needs `_sqlnow_row_height` too, or the extra lines have
+nowhere to go. And an unknown name or an unusable value is ignored rather than
+refused, so a style you got slightly wrong shows as plain text — check the
+cell, not for an error.
+
+## 7. Constraints
 
 - One server per session file; while running, the server is the writer of
   record. Use the HTTP API for live changes; direct `exec` writes work but

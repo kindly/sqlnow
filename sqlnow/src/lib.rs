@@ -20,7 +20,7 @@ use libsqlnow::{
     StoredSession,
     TableData,
 };
-use actix_web::{App, HttpServer, dev::Server, web::Data};
+use actix_web::{App, HttpServer, dev::Server, web::Data, web::FormConfig};
 
 /// The agent guide ships inside the binary so it is discoverable from the
 /// CLI alone, with no repo checkout.
@@ -444,7 +444,11 @@ fn print_box(table: &TableData) {
     );
 }
 
-fn print_table(table: &TableData, format: SqlFormat) -> Result<()> {
+fn print_table(table: TableData, format: SqlFormat) -> Result<()> {
+    // directive columns are the viewer's business: they are hidden there and
+    // hidden here, so the same SQL prints the same columns everywhere. Done
+    // inside rather than at the call sites so a third one cannot forget.
+    let table = &table.data_only();
     if table.headers.is_empty() {
         return Ok(());
     }
@@ -485,12 +489,12 @@ fn run_exec(session_path: &str, sql: &str, format: SqlFormat) -> Result<()> {
     // deliberately not scoped to one session: `exec` has to be able to inspect
     // and repair the store, which holds many
     let table_data = exec_sql(std::path::Path::new(session_path), sql)?;
-    print_table(&table_data, format)
+    print_table(table_data, format)
 }
 
 fn run_sql(db_path: &str, sql: &str, format: SqlFormat, limit: Option<usize>) -> Result<()> {
     let table_data = query_database(db_path, sql, limit.unwrap_or(usize::MAX))?;
-    print_table(&table_data, format)
+    print_table(table_data, format)
 }
 
 /// Parse the process arguments. The `ArgMatches` come back alongside `Cli`
@@ -1636,6 +1640,11 @@ pub fn serve(app_data: AppData, host: &str, port: u16) -> Result<(Server, Socket
     let server = HttpServer::new(move || {
         App::new()
             .configure(main_web)
+            // Queries and exports arrive as form bodies, and actix caps those at
+            // 16 KiB by default — which a generated query passes easily, failing
+            // with a 413 that says nothing about SQL. Matched to the 2 MiB actix
+            // already allows for the JSON bodies the query API takes.
+            .app_data(FormConfig::default().limit(2 * 1024 * 1024))
             .app_data(Data::new(app_data.clone()))
     })
     .bind((host, port))

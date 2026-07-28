@@ -3,6 +3,12 @@ import PropTypes from 'prop-types';
 import { useOutletContext, useNavigate } from "react-router-dom";
 import { storageKey, fetchQuery, fetchQueries, updateQuery, deleteQueryApi, queryPath } from './utils';
 import { editorTheme, gridTheme } from './theme';
+import {
+  buildFormatPlan, buildColumnConfig, cellFormat, cellSpec, rowHeight, DEFAULT_ROW_HEIGHT,
+} from './cell-format';
+// only the renderers the cell kinds actually use, so the barrel's editor-heavy
+// cells (dropdown, article) stay out of the bundle where the bundler can manage it
+import { RangeCell, SparklineCell, TagsCell } from '@glideapps/glide-data-grid-cells';
 import { DataEditor, GridCellKind } from '@glideapps/glide-data-grid';
 import "@glideapps/glide-data-grid/dist/index.css";
 import { vim } from "@replit/codemirror-vim";
@@ -13,6 +19,9 @@ import CodeMirror from '@uiw/react-codemirror';
 import { langs } from '@uiw/codemirror-extensions-langs';
 
 const ghostButton = "rounded border border-edge bg-transparent px-2 py-0.5 font-mono text-[11px] text-muted hover:border-edge-strong hover:text-ink";
+
+// Stable across renders: glide rebuilds its renderer map whenever this changes.
+const CUSTOM_RENDERERS = [RangeCell, SparklineCell, TagsCell];
 
 function surroundWithQuotes(str) {
   return `"${str.replace('"', '""')}"`;
@@ -130,6 +139,18 @@ export default function QueryForm(props) {
   const [displayLimit, setDisplayLimit] = useState('500');
 
   const [results, setResults] = useState(null);
+
+  // Which columns the grid shows and where each directive column points. Must be
+  // declared above onColumnResize, which maps a visual index through it.
+  const formatPlan = useMemo(
+    () => (results ? buildFormatPlan(results.headers) : null),
+    [results]
+  );
+  const columnConfigs = useMemo(
+    () => (results && formatPlan ? buildColumnConfig(formatPlan, results.rows, theme) : []),
+    [results, formatPlan, theme]
+  );
+
   const [error, setError] = useState(null);
   const [running, setRunning] = useState(false);
   const [stats, setStats] = useState(null);
@@ -180,12 +201,15 @@ export default function QueryForm(props) {
   }
 
   const onColumnResize = useCallback((column, newSize, colIndex) => {
+    // colIndex is a visual index; columnWidths is keyed by data index, because
+    // hiding a column must not shift the width of the ones after it
+    const dataIndex = formatPlan ? formatPlan.visibleToData[colIndex] : colIndex;
     setColumnWidths(prevColumns => {
       let new_columns = [...prevColumns]
-      new_columns[colIndex] = newSize
+      new_columns[dataIndex] = newSize
       return new_columns;
     });
-  }, []);
+  }, [formatPlan]);
 
   async function runQuery() {
     if (running) {
@@ -212,7 +236,13 @@ export default function QueryForm(props) {
       )
       let resp = await res.json();
       setResults(resp.table_data);
-      setColumnWidths(Array(resp.table_data.headers.length).fill(150));
+      // a width the SQL asked for only seeds the column; a later drag overwrites
+      // it and stands until the next run, so the grid never fights the mouse
+      const plan = buildFormatPlan(resp.table_data.headers);
+      const configs = buildColumnConfig(plan, resp.table_data.rows, theme);
+      setColumnWidths(
+        resp.table_data.headers.map((_, i) => configs[i]?.width || 150)
+      );
       setError(resp.error);
       setStats(resp.error ? null : {
         rows: resp.table_data.rows.length,
@@ -240,28 +270,80 @@ export default function QueryForm(props) {
   ], [vimEnabled]);
 
   let columns = useMemo(() => {
-    if (!results) {
+    if (!results || !formatPlan) {
       return [];
     }
-    return results.headers.map((header, i) => {
+    return formatPlan.visibleToData.map((dataIndex) => {
+      const header = results.headers[dataIndex];
       return {
         "title": header,
         "id": header,
-        "width": columnWidths[i] || 150
+        "width": columnWidths[dataIndex] || 150
       }
     });
 
-  }, [results, columnWidths]);
+  }, [results, formatPlan, columnWidths]);
 
-  function getCellContent(cell) {
+  const getCellContent = useCallback((cell) => {
     const [col, row] = cell;
+    const rowData = results.rows[row];
+    const dataCol = formatPlan.visibleToData[col];
+    const value = rowData[dataCol];
 
-    return {
+    const config = columnConfigs[dataCol];
+    const base = {
       kind: GridCellKind.Text,
-      data: results.rows[row][col],
-      displayData: results.rows[row][col]
+      data: value,
+      displayData: value,
+      allowWrapping: config?.wrap === true,
+      contentAlign: config?.align,
+    };
+
+    // a JSON spec says what the cell *is*, so it replaces the text cell rather
+    // than decorating it, and it carries its own styling
+    if (formatPlan.anyCell) {
+      const json = formatPlan.cellFor[dataCol];
+      if (json >= 0) {
+        const spec = cellSpec(rowData[json], theme);
+        if (spec !== null) {
+          return { ...spec, contentAlign: spec.contentAlign ?? base.contentAlign };
+        }
+      }
     }
-  }
+
+    if (!formatPlan.anyFormat) {
+      return base;
+    }
+    const src = formatPlan.formatFor[dataCol];
+    if (src < 0) {
+      return base;
+    }
+    const style = cellFormat(rowData[src], theme);
+    if (style === null) {
+      return base;
+    }
+    // a cell's own alignment wins over the column's
+    return {
+      ...base,
+      themeOverride: style.themeOverride,
+      contentAlign: style.contentAlign ?? base.contentAlign,
+    };
+  }, [results, formatPlan, columnConfigs, theme]);
+
+  // A constant keeps glide on its uniform-height path; the closure is only built
+  // when the result asks for heights, and reads a precomputed array because glide
+  // calls this per row per frame.
+  const rowHeights = useMemo(() => {
+    if (!results || !formatPlan || formatPlan.rowHeightAt < 0) {
+      return DEFAULT_ROW_HEIGHT;
+    }
+    const src = formatPlan.rowHeightAt;
+    const heights = new Int16Array(results.rows.length);
+    for (let i = 0; i < results.rows.length; i++) {
+      heights[i] = rowHeight(results.rows[i][src]) || DEFAULT_ROW_HEIGHT;
+    }
+    return (row) => heights[row] || DEFAULT_ROW_HEIGHT;
+  }, [results, formatPlan]);
 
   async function commitRename() {
     const newName = nameDraft.trim();
@@ -399,9 +481,14 @@ export default function QueryForm(props) {
             rows={results.rows.length}
             width="100%"
             height="100%"
-            rowHeight={26}
+            rowHeight={rowHeights}
             headerHeight={28}
+            // glide's own floor, rather than its 50px default: a `width:` a query
+            // asked for should be honoured, and 50 is wide enough to make narrow
+            // columns impossible
+            minColumnWidth={20}
             onColumnResize={onColumnResize}
+            customRenderers={CUSTOM_RENDERERS}
             theme={gridTheme(theme)}
           />
         }

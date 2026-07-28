@@ -152,6 +152,53 @@ pub struct TableData {
     pub truncated: bool,
 }
 
+/// Columns whose name starts with this are instructions to the viewer rather
+/// than data: `_sqlnow_format_<column>` styles that column's cells,
+/// `_sqlnow_column_<column>` sizes it, `_sqlnow_row_height` sets row heights.
+/// The prefix is reserved whole so a later directive needs no new agreement —
+/// anything unknown under it is dropped rather than shown.
+pub const DIRECTIVE_PREFIX: &str = "_sqlnow_";
+
+/// The indexes of the data columns, or `None` when every column is one, which
+/// is nearly every query and the case that has to cost nothing.
+fn data_columns(headers: &[String]) -> Option<Vec<usize>> {
+    if !headers.iter().any(|h| h.starts_with(DIRECTIVE_PREFIX)) {
+        return None;
+    }
+    Some(
+        (0..headers.len())
+            .filter(|&i| !headers[i].starts_with(DIRECTIVE_PREFIX))
+            .collect(),
+    )
+}
+
+/// The kept cells of a row, in order. Takes the row so the strings move.
+fn select(mut row: Vec<String>, keep: &[usize]) -> Vec<String> {
+    keep.iter().map(|&i| std::mem::take(&mut row[i])).collect()
+}
+
+impl TableData {
+    /// This result with its directive columns dropped: what every route out
+    /// renders except the grid, which is the one consumer that needs them.
+    /// The grid hides them too, so an export that kept them would hand the
+    /// user a file that did not match what they were looking at.
+    ///
+    /// Hiding belongs here and not in `run_query`, which stays honest and
+    /// returns what the SQL asked for — strip it there and `/query.json` loses
+    /// the columns the whole feature is built on.
+    pub fn data_only(mut self) -> TableData {
+        let Some(keep) = data_columns(&self.headers) else {
+            return self;
+        };
+        let headers = std::mem::take(&mut self.headers);
+        self.headers = select(headers, &keep);
+        for row in &mut self.rows {
+            *row = select(std::mem::take(row), &keep);
+        }
+        self
+    }
+}
+
 /// What the server holds for the life of a run.
 ///
 /// Deliberately almost nothing: the tab list, the attaches to replay and the
@@ -1195,6 +1242,55 @@ mod tests {
         assert_eq!(row[3], "01:02:03");
         assert_eq!(row[4], "1969-12-31 23:00:00");
     }
+
+    #[test]
+    fn directive_columns_survive_the_query_and_die_at_the_edge() {
+        let conn = Connection::open_in_memory().unwrap();
+        let table_data = run_query(
+            "SELECT 1 AS co2, 'warn' AS _sqlnow_format_co2, 2 AS mw",
+            &conn,
+            10,
+        )
+        .unwrap();
+        // the grid is the one consumer that needs them, so the fetch keeps them
+        assert_eq!(table_data.headers, vec!["co2", "_sqlnow_format_co2", "mw"]);
+
+        let data = table_data.data_only();
+        assert_eq!(data.headers, vec!["co2", "mw"]);
+        // the surviving cells are the right ones, not merely the right count
+        assert_eq!(data.rows, vec![vec!["1", "2"]]);
+    }
+
+    #[test]
+    fn a_result_without_directives_is_left_alone() {
+        let conn = Connection::open_in_memory().unwrap();
+        let table_data = run_query("SELECT 1 AS a, 'x' AS b", &conn, 10).unwrap();
+        let before = table_data.clone();
+        let after = table_data.data_only();
+        assert_eq!(after.headers, before.headers);
+        assert_eq!(after.rows, before.rows);
+    }
+
+    #[test]
+    fn an_unknown_directive_is_dropped_too() {
+        let conn = Connection::open_in_memory().unwrap();
+        // whatever a later version means by this, today's exports must not leak it
+        let table_data = run_query("SELECT 1 AS a, 'wat' AS _sqlnow_wat", &conn, 10)
+            .unwrap()
+            .data_only();
+        assert_eq!(table_data.headers, vec!["a"]);
+        assert_eq!(table_data.rows, vec![vec!["1"]]);
+    }
+
+    #[test]
+    fn a_result_of_nothing_but_directives_is_empty_not_broken() {
+        let conn = Connection::open_in_memory().unwrap();
+        let table_data = run_query("SELECT 'warn' AS _sqlnow_format_x", &conn, 10)
+            .unwrap()
+            .data_only();
+        assert!(table_data.headers.is_empty());
+        assert_eq!(table_data.rows, vec![Vec::<String>::new()]);
+    }
 }
 
 pub fn main_web(service_config: &mut ServiceConfig) {
@@ -1622,12 +1718,16 @@ async fn output_limited(
     let table_data = run_query(&sql, held.get(), limit).map_err(|e| ErrorBadRequest(e.to_string()))?;
     drop(held);
 
-    let body = render_rows(&table_data, output).map_err(ErrorInternalServerError)?;
+    // counted before the hiding, which cannot change either of these
+    let rows = table_data.rows.len();
+    let truncated = table_data.truncated;
+
+    let body = render_rows(&table_data.data_only(), output).map_err(ErrorInternalServerError)?;
     Ok(HttpResponse::Ok()
         .insert_header(("Content-Disposition", content_disposition(output)))
         .insert_header(("Content-Type", content_type(output)))
-        .insert_header(("X-Sqlnow-Rows", table_data.rows.len().to_string()))
-        .insert_header(("X-Sqlnow-Truncated", table_data.truncated.to_string()))
+        .insert_header(("X-Sqlnow-Rows", rows.to_string()))
+        .insert_header(("X-Sqlnow-Truncated", truncated.to_string()))
         .body(body))
 }
 
@@ -1774,12 +1874,20 @@ async fn output_stream(
             }
         };
 
-        let headers: Vec<String> = match db_rows.as_ref() {
+        // process_row indexes the row by position, so it keeps seeing every
+        // column; the hiding happens to the strings it hands back
+        let all_headers: Vec<String> = match db_rows.as_ref() {
             Some(statement) => statement.column_names(),
             None => {
                 yield Err::<Bytes, Error>(ErrorInternalServerError("the query returned no result set"));
                 return;
             }
+        };
+        // the same hiding the grid does, decided once for the whole stream
+        let keep = data_columns(&all_headers);
+        let headers: Vec<String> = match &keep {
+            Some(keep) => keep.iter().map(|&i| all_headers[i].clone()).collect(),
+            None => all_headers.clone(),
         };
 
         match output {
@@ -1796,7 +1904,11 @@ async fn output_stream(
         }
 
         while let Some(row) = db_rows.next().map_err(ErrorInternalServerError)? {
-            let row = process_row(row, &headers).map_err(ErrorInternalServerError)?;
+            let row = process_row(row, &all_headers).map_err(ErrorInternalServerError)?;
+            let row = match &keep {
+                Some(keep) => select(row, keep),
+                None => row,
+            };
             let mut buf = Vec::new();
             match output {
                 OutputFormat::CSV => {

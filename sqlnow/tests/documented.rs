@@ -103,6 +103,32 @@ fn sql_reads_a_database_a_server_is_holding() {
 }
 
 #[test]
+fn the_documented_styling_recipe_styles_and_stays_out_of_the_download() {
+    let space = Workspace::new("styling");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+
+    // section 6's own example, in the shapes it documents
+    let sql = "SELECT name, co2,
+                      CASE WHEN co2 > 300 THEN 'warn' END AS _sqlnow_format_co2,
+                      'width:420; wrap' AS _sqlnow_column_name,
+                      56 AS _sqlnow_row_height
+               FROM plants ORDER BY name";
+    let table = server.query(sql)["table_data"].clone();
+    let headers: Vec<&str> =
+        table["headers"].as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
+    // the grid is handed all of it — the styling is only in the result
+    assert!(headers.contains(&"_sqlnow_format_co2"));
+    assert!(headers.contains(&"_sqlnow_column_name"));
+    assert!(headers.contains(&"_sqlnow_row_height"));
+    assert_eq!(table["rows"][1][2], "warn");
+
+    // and the recipe printed under it, verbatim
+    let downloaded =
+        server.export("SELECT 1 AS co2, 'warn' AS _sqlnow_format_co2", "csv");
+    assert_eq!(downloaded, "co2\n1\n");
+}
+
+#[test]
 fn the_agent_guide_ships_inside_the_binary() {
     let space = Workspace::new("agents-help");
     let printed = space.run_text(&["--agents-help"]);

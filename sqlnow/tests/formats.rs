@@ -87,6 +87,83 @@ fn container_columns_survive_every_route_out() {
 }
 
 #[test]
+fn a_query_larger_than_a_form_body_still_runs() {
+    let space = Workspace::new("big-query");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+
+    // actix caps form bodies at 16 KiB by default, and a generated query passes
+    // that easily — a raster of styled columns did. The failure was a 413 that
+    // said nothing about SQL, so the size a query may be is worth pinning.
+    let padding: String = std::iter::repeat("-- filler to push this over 16 KiB\n")
+        .take(700)
+        .collect();
+    assert!(padding.len() > 16 * 1024, "the padding has to exceed the old cap");
+    let sql = format!("{padding}SELECT 42 AS answer");
+
+    assert_eq!(server.query(&sql)["table_data"]["rows"][0][0], "42");
+    // exports post the same body to a different route
+    assert_eq!(server.export(&sql, "csv"), "answer\n42\n");
+}
+
+#[test]
+fn format_columns_never_reach_an_export() {
+    let space = Workspace::new("directives");
+    let server = space.start(&[&space.csv("plants.csv").to_string_lossy()]);
+    // self-contained so that every route below runs the identical SQL, which is
+    // the whole claim: the routes agree, and they agree in hiding
+    let sql = "SELECT name, co2,
+                      CASE WHEN co2 > 300 THEN 'warn' END AS _sqlnow_format_co2,
+                      to_json({'kind': 'bar', 'value': 0.5}) AS _sqlnow_cell_co2,
+                      'width:200' AS _sqlnow_column_name,
+                      30 AS _sqlnow_row_height
+               FROM (VALUES ('Plant A', 120), ('Plant B', 340)) t(name, co2)
+               ORDER BY name";
+
+    // the grid is the one consumer that needs them, so the viewer keeps them
+    let headers = server.query(sql)["table_data"]["headers"].clone();
+    let headers: Vec<&str> = headers.as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
+    assert_eq!(
+        headers,
+        [
+            "name",
+            "co2",
+            "_sqlnow_format_co2",
+            "_sqlnow_cell_co2",
+            "_sqlnow_column_name",
+            "_sqlnow_row_height"
+        ]
+    );
+
+    // a file the user hands to someone else is data only — the grid hides
+    // these, so an export that kept them would not match what was on screen
+    assert_eq!(server.export(sql, "csv"), "name,co2\nPlant A,120\nPlant B,340\n");
+    assert_eq!(server.export(sql, "tab"), "name\tco2\nPlant A\t120\nPlant B\t340\n");
+    let jsonl = server.export(sql, "jsonl");
+    let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+    assert_eq!(first.get("_sqlnow_format_co2"), None);
+    assert_eq!(first["co2"], "120");
+
+    // the buffered path is a different function from the streaming one, and its
+    // row count is read before the hiding: dropping columns is not dropping rows
+    let (body, rows, truncated) = server.export_limited(sql, "csv", 10);
+    assert_eq!(body, "name,co2\nPlant A,120\nPlant B,340\n");
+    assert_eq!(rows, "2");
+    assert_eq!(truncated, "false");
+
+    // and the CLI, which agrees with the server byte for byte
+    space.exec(&space.path().join("scratch.sqlnow"), "SELECT 1");
+    let text = space.run_text(&["sql", "scratch.sqlnow", sql, "-f", "csv"]);
+    assert_eq!(text, "name,co2\nPlant A,120\nPlant B,340\n");
+    assert!(!space.run_text(&["sql", "scratch.sqlnow", sql]).contains("_sqlnow"));
+
+    // nothing but directives leaves nothing to export, which is empty and not
+    // an error — a guard here would only turn a blank file into a 500
+    let (status, body) = server.export_status("SELECT 'warn' AS _sqlnow_format_x", "csv");
+    assert_eq!(status, 200);
+    assert!(!body.contains("_sqlnow"), "{}", body);
+}
+
+#[test]
 fn sql_can_start_with_a_comment() {
     let space = Workspace::new("leading-comment");
     space.exec(&space.path().join("scratch.sqlnow"), "SELECT 1");
