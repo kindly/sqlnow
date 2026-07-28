@@ -1,6 +1,6 @@
 [package]
 name = "libsqlnow"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 license = "MIT"
 description = "Server library for sqlnow: DuckDB-backed SQL viewer with agent-seeded queries and session files"
