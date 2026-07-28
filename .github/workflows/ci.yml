@@ -190,6 +190,21 @@ jobs:
         working-directory: ui
         run: npm run lint
 
+      - name: Test
+        working-directory: ui
+        run: npm test
+
       - name: Build
         working-directory: ui
         run: npm run build
+
+      # The built UI is committed and embedded via include_dir, so a source
+      # change without a rebuild ships a stale page. The build above overwrites
+      # static/, so anything left over means what was committed did not match.
+      - name: The committed UI is the built UI
+        run: |
+          if ! git diff --quiet -- libsqlnow/static; then
+            echo "libsqlnow/static is stale — run 'cd ui && npm run build' and commit:"
+            git diff --stat -- libsqlnow/static
+            exit 1
+          fi
