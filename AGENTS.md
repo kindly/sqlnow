@@ -2,12 +2,26 @@
 
 sqlnow turns data files and databases into a browser UI for a human, with
 queries you define up front. This document is the integration reference:
-how to launch sessions, seed queries, point the user at the right place, and
-read back what they did.
+how to launch sessions, seed queries, style the results, point the user at the
+right place, and read back what they did.
 
 This guide ships inside the binary: `sqlnow --agents-help` prints it, so it
 is always available (and always matches the binary's version) even without
 this repository.
+
+It only covers what you cannot work out from the SQL: nothing here teaches
+DuckDB. Skip to what you need —
+
+1. **Launching** — the one command that does it, naming, relaying the URL.
+2. **HTTP API** — changing a running session; attaching data to it.
+3. **`sqlnow sql`** — answering a question with no server and no UI.
+4. **Session files** — preparing a session for someone else to open.
+5. **Reading back** — what the user ran after you handed it over.
+6. **Styling** — colour a cell, a bar or sparkline in it, column widths. This
+   is how a diff reads as a diff, a check reads as pass/fail, and a number
+   reads as big or small. You cannot guess these column names; read the
+   section before showing a comparison or a judgement.
+7. **Constraints** — one server per session, row caps, what not to run.
 
 ## 1. Launching (the common case)
 
@@ -103,8 +117,8 @@ Practical notes that save time:
 - **Attaches replay automatically.** Once a launch has recorded inputs in the
   session file, later launches (`sqlnow data.duckdb`, `sqlnow session.sqlnow`)
   and `sqlnow sql` replay them — do not re-pass `-v`/`-t` each time.
-- **Postgres over a Unix socket**: if TCP is refused, pass the socket
-  directory libpq-style: `postgresql://localhost/dbname?host=/run/postgresql`.
+- **A result can carry its own colours and widths** (§6). Worth a look before
+  writing a query whose point is a comparison or a verdict rather than a list.
 
 ## 2. HTTP API (live channel, always safe)
 
@@ -171,15 +185,12 @@ attached. **`DELETE` drops the view or table**, so with a main database it
 removes it from that file for good; detaching a *database* input only detaches
 it and leaves the file alone.
 
-**`/query.json` cannot write.** The server holds its main database read-only
-and attaches every other database read-only, so DDL or DML sent to
-`/query.json` — or typed by the user in the editor — comes back as
-`Cannot execute statement of type "CREATE" … read-only mode`. That is
-deliberate: the browser is a viewer. Add data with `POST /api/inputs`, which is
-the one path that escalates to write access. `sqlnow sql` and `sqlnow exec`
-still work while a server runs — `sql` reads the main database alongside it and
-falls back to a writable connection only if a statement needs one, and `exec`
-touches session files, which are never held.
+**`/query.json` cannot write.** The server holds its main database, and every
+database it attaches, read-only — so DDL or DML sent there, or typed by the user
+in the editor, comes back as
+`Cannot execute statement of type "CREATE" … read-only mode`. `POST /api/inputs`
+is the one path that escalates to write access; for anything else use
+`sqlnow sql`, which works alongside a running server.
 
 **Live updates**: the UI subscribes to `/api/events`, so queries you add or
 update on a running server appear in the user's browser within about a
@@ -194,9 +205,8 @@ Percent-encode them in URLs. The UI deep link for a query is
 
 ### Getting results: which route to use
 
-Three routes run SQL, and the choice is not about speed — a request takes
-about 4ms and a `sqlnow sql` process about 30ms, both noise next to your own
-round trip. Choose on what each one can do:
+Three routes run SQL. All three are fast enough that speed is not the
+question — choose on what each one can do:
 
 | | writes | lands in history | row limit | errors |
 |---|---|---|---|---|
@@ -217,11 +227,9 @@ The rules that follow from that:
 4. **Reading for the user** — `POST /query.json`, *because* it records the
    query and pokes the UI. That is how they retrace what you did.
 
-Formats, measured on the same 200-row × 3-column result: csv and tab 3.7 kB,
-`query.json` 5.4 kB, the box table 7.5 kB, json and jsonl 8.9 kB. **Prefer
-csv.** Repeating keys on every row costs more than any framing, which is why
-`query.json`'s `{headers, rows}` shape beats jsonl; the box table is for
-humans only.
+**Prefer csv.** On the same 200-row × 3-column result: csv and tab 3.7 kB,
+`query.json` 5.4 kB, the box table 7.5 kB, json and jsonl 8.9 kB. The box
+table is for humans only.
 
 ```bash
 # form-encoded, not JSON — the same endpoint the UI uses
@@ -244,20 +252,16 @@ unless you look:
 - `query.json` — `table_data.truncated`, with the limit that produced it in
   `limit`. It defaults to **500 rows** even when you do not ask for a limit.
 - `/outputs` with `limit=N` — `X-Sqlnow-Truncated` and `X-Sqlnow-Rows`
-  headers. The body is buffered in this mode (bounded by your limit) so the
-  headers can be exact; without `limit` it streams the whole result and sends
-  no such headers, because by then there is nothing left to say.
+  headers. Without `limit` it streams the whole result and sends no such
+  headers.
 - `sqlnow sql --limit N` — `(N rows, truncated — there are more)` in the box
   footer, or a note on **stderr** for csv/json/jsonl so stdout stays parseable.
 
-A count is never reported, only whether there was more: proving it takes one
-extra row, while counting would take a second pass over the whole table.
+You are told whether there was more, never how much more.
 
-The limit is given to the database, not applied to the rows afterwards, so
-asking for 500 rows of a huge table is cheap — 500 of 20M costs about 20ms
-rather than the third of a second and gigabyte of memory it takes to build
-the whole result first. A query that already carries its own `LIMIT` keeps
-it and is left alone.
+The limit goes into the query rather than being applied afterwards, so 500 rows
+of a 20M-row table costs about 20ms — asking for a limit is always cheaper than
+not. A query that carries its own `LIMIT` is left alone.
 
 ## 3. Querying the database: `sqlnow sql`
 
@@ -284,12 +288,12 @@ same stringification the UI grid uses) — including containers, which render
 the way duckdb prints them: a `LIST` as `[1, 10]`, a `STRUCT` as `{a: 1}`, a
 `MAP` as `{k: 1}`. If you need the parts separately, unnest or cast in SQL
 (`array_to_string(lst, ',')`, `to_json(st)`) rather than parsing that text.
-SQL may begin with a `--` comment; no `--` separator is needed. This works even while a sqlnow
-server has the database open — the server holds no connection between
-requests — though a concurrent operation can occasionally hit a lock (brief
-automatic retry, then a clear error). On a running server the HTTP
-equivalents are `POST /query.json` (JSON results) and `POST /outputs`
-(streaming csv/tsv/jsonl).
+SQL may begin with a `--` comment; no `--` separator is needed.
+
+This works even while a server has the database open, because the server holds
+no connection between requests — though a concurrent operation can occasionally
+hit a lock (brief automatic retry, then a clear error). The HTTP API never
+does, so prefer it for live changes.
 
 ## 4. Session files and `sqlnow exec`
 
@@ -312,12 +316,10 @@ single-session file, `(SELECT id FROM sessions)` is that one id. Format 1
 files (no `format` table, no `session` column) are migrated in place the
 first time they are opened.
 
-`sqlnow exec` runs SQL against a session database using sqlnow's own embedded
-DuckDB — nothing else to install, no version mismatch. It creates the file
-(with the schema and one session) if missing, so you can seed before the first
-launch, and it works on the multi-session store too. It refuses to touch an
-existing database that is not a session file (query those with `sqlnow sql`
-instead):
+`sqlnow exec` is `sqlnow sql` for session databases. It creates the file (with
+the schema and one session) if missing, so you can seed before the first launch,
+and it works on the multi-session store too. It refuses to touch an existing
+database that is not a session file (use `sqlnow sql` for those):
 
 ```bash
 sqlnow exec session.sqlnow "INSERT INTO queries(session, pos, name, sql)
@@ -337,10 +339,9 @@ sqlnow exec session.sqlnow "INSERT INTO queries(session, pos, name, sql)
   SELECT id, 1, 'names', \$q\$SELECT name FROM t WHERE note = 'it''s fine'\$q\$ FROM sessions"
 ```
 
-This also works while a server is running — the server
-holds no file handle between requests — but concurrent access can
-occasionally hit a lock; the HTTP API never does, so prefer it for live
-changes.
+Unlike `sqlnow sql`, this never contends with a running server: session files are
+never held open. The HTTP API is still preferable for live changes, because the
+UI hears about those within a second.
 
 ## 5. Reading back what the user did
 
@@ -429,9 +430,8 @@ The styling keys work here too — `bg`, `fg`, `bold`, `italic`, `align` — so 
 column can be both a kind and a colour: `{"kind":"bar","value":0.4,"bg":"warn"}`.
 Cells are read-only; nothing in the grid edits.
 
-An unknown `kind`, a missing `kind`, or malformed JSON all fall back to showing
-the column's own text, so a spec you got wrong looks plain rather than failing.
-That is also how a newer kind degrades on an older binary.
+An unknown or missing `kind`, or malformed JSON, falls back to the column's own
+text — which is how a newer kind degrades on an older binary.
 
 The prefix `_sqlnow_` is reserved. Any column using it is an instruction to the
 viewer rather than data, so it is hidden from the grid **and from every export**
