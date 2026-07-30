@@ -339,3 +339,59 @@ fn a_watching_page_does_not_hold_the_server_open() {
     eprintln!("shutdown with a page watching took {:?}", took);
     let _ = watching.join();
 }
+
+/// A store that cannot be written must cost only the listing, never the run.
+/// This is an agent inside a sandbox that allows writes nowhere but the
+/// working directory: the launch used to print two alarming notes (anchored)
+/// or fail outright (unanchored), either of which taught the agent to escape
+/// the sandbox.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_store_does_not_stop_an_anchored_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let space = Workspace::new("unwritable-anchored");
+    let csv = space.csv("plants.csv");
+    let config = space.path().join("config/sqlnow");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555))
+        .expect("making the store unwritable");
+
+    let server = space.start(&["--db", "plants.duckdb", "-v", &csv.to_string_lossy()]);
+    // one calm note, saying where the session actually is
+    let printed = server.wait_for_output("not writable from here");
+    assert!(printed.contains("The session itself is unaffected"), "{}", printed);
+    assert_eq!(server.tables(), ["plants"]);
+    server.stop();
+
+    // it lost nothing: everything is in the sidecar next to the database
+    assert!(space.path().join("plants.duckdb.sqlnow").exists());
+
+    // so the scratch directory can be removed again
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755))
+        .expect("restoring permissions");
+}
+
+/// The same, for a run kept in the store itself: rather than refusing to
+/// start, it runs with a session that lasts only for the run, and says so.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_store_does_not_stop_an_unanchored_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let space = Workspace::new("unwritable-unanchored");
+    let csv = space.csv("plants.csv");
+    let config = space.path().join("config/sqlnow");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o555))
+        .expect("making the store unwritable");
+
+    let server = space.start(&[&csv.to_string_lossy(), "-q", "kept=SELECT * FROM plants"]);
+    let printed = server.wait_for_output("session not persisted");
+    assert!(printed.contains("not writable from here"), "{}", printed);
+    // and the run itself works: data attached, query saved for the run
+    assert_eq!(server.tables(), ["plants"]);
+    assert_eq!(server.query_names(), ["kept"]);
+    server.stop();
+
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755))
+        .expect("restoring permissions");
+}

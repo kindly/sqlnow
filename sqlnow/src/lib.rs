@@ -1271,6 +1271,8 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     // the set of inputs it was given: run the same command again and the same
     // session comes back, queries and history included. Nothing is deleted.
     let mut resumed_queries: Option<usize> = None;
+    // whether the store exists but refused to be written, for the closing note
+    let mut store_unwritable = false;
     let session = match (&kept, &resume_id) {
         (Some(path), _) => Session::open(path)?,
         (None, Some(id)) => {
@@ -1281,14 +1283,28 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
             session
         }
         (None, None) => match store_path() {
-            Some(store) => {
-                let (session, created) =
-                    Session::open_in_store(&store, &session_key(&views, &tables))?;
-                if !created {
-                    resumed_queries = Some(session.list_queries()?.len());
+            // The store is a convenience, not a requirement: a run that cannot
+            // write to it (a sandbox, a read-only home) still works, it just
+            // is not remembered. Failing here would turn "not listed" into
+            // "not usable", which is the wrong trade in every case.
+            Some(store) => match Session::open_in_store(&store, &session_key(&views, &tables)) {
+                Ok((session, created)) => {
+                    if !created {
+                        resumed_queries = Some(session.list_queries()?.len());
+                    }
+                    session
                 }
-                session
-            }
+                Err(e) => {
+                    eprintln!(
+                        "note: the session store at {} is not writable from here ({})",
+                        store.display(),
+                        e
+                    );
+                    // the session summary below explains the consequence
+                    store_unwritable = true;
+                    Session::in_memory()?
+                }
+            },
             None => {
                 // the session summary below says the same thing, with the hint
                 Session::in_memory()?
@@ -1309,10 +1325,22 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     let mut closer_reopen = None;
     match (cli.no_register, reopen) {
         (false, Some(path)) => {
+            // A store that cannot be written (a sandbox, a read-only home) is
+            // given up on for the whole run after one note, rather than
+            // complained about again at every touch: the session itself lives
+            // in its own file and loses nothing.
             if let Some(store) = &closer_store {
                 if let Err(e) = register_session(store, session.id(), &path, session.changed_at())
                 {
-                    eprintln!("note: could not add {} to the session list ({})", path.display(), e);
+                    eprintln!(
+                        "note: the session list at {} is not writable from here ({}), \
+                         so this session will not show in `sqlnow --resume`. \
+                         The session itself is unaffected: everything is saved in {}",
+                        store.display(),
+                        e,
+                        session.path().unwrap_or(&path).display()
+                    );
+                    closer_store = None;
                 }
             }
             closer_reopen = Some(path);
@@ -1494,6 +1522,11 @@ pub async fn prepare(cli: &Cli, matches: &clap::ArgMatches) -> Result<Prepared> 
     // same inputs will come back to it and `--resume` can find it
     if kept.is_none() {
         match (persistent, resumed_queries) {
+            (false, _) if store_unwritable => println!(
+                "note: session not persisted — the session store could not be \
+                 written, so queries and history last only for this run. \
+                 Set XDG_CONFIG_HOME to somewhere writable to keep them."
+            ),
             (false, _) => println!(
                 "note: session not persisted — no writable config directory for the \
                  session store, so queries and history last only for this run. \
