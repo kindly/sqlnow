@@ -363,13 +363,18 @@ async function attachData(which) {
   }
 }
 
-/// Every session in the store, as the server in front sees them.
+/// The sessions worth offering, as the server in front sees them.
+///
+/// A session whose file or inputs have gone cannot be opened — the launcher
+/// refuses it — so a menu entry for it is a dead end, and scratch runs leave
+/// plenty of them behind. The one this window is serving stays regardless: it
+/// is the checked entry, and dropping it would misreport where we are.
 async function storedSessions(url) {
   try {
     const response = await fetch(`${url}/api/sessions`);
     if (!response.ok) return [];
     const body = await response.json();
-    return body.sessions ?? [];
+    return (body.sessions ?? []).filter((session) => !session.missing || session.current);
   } catch {
     return [];
   }

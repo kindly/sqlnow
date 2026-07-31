@@ -1159,6 +1159,34 @@ pub struct StoredSession {
     pub url: Option<String>,
 }
 
+impl StoredSession {
+    /// Whether what this session is made of has gone, so resuming it can only
+    /// fail: the file it lives in, or — for a session the store holds itself —
+    /// every local file it recorded as an input. Listings hide these by
+    /// default, because nothing can be done with them but delete them.
+    ///
+    /// A session claiming a published address is never called missing, so the
+    /// one thing a listing is needed for — finding the port of a running
+    /// server — keeps working. That claim is not proof, but a shown row is
+    /// pinged, and a stale address is cleared as it is found: the row is
+    /// therefore hidden from the next listing rather than this one.
+    ///
+    /// Remote inputs (`postgresql://`, `s3://`, `http://`) cannot be stat'd,
+    /// so a session made only of those is never missing. One surviving local
+    /// input is also enough to keep it: resuming will complain about the rest,
+    /// which is more use than the row silently disappearing.
+    pub fn missing(&self) -> bool {
+        if self.url.is_some() {
+            return false;
+        }
+        if let Some(path) = &self.path {
+            return !Path::new(path).exists();
+        }
+        let mut local = self.inputs.iter().filter(|uri| !uri.contains("://")).peekable();
+        local.peek().is_some() && local.all(|uri| !Path::new(uri).exists())
+    }
+}
+
 /// Record a session that lives in its own file, so `--resume` can find it
 /// alongside the ones the store holds itself. The row is a pointer: the
 /// queries and history stay in that file, and only where it is, when it was

@@ -200,6 +200,10 @@ async fn describe_session(app_data: web::Data<AppData>) -> HttpResponse {
 /// claim rather than proof: a process killed outright leaves its address
 /// behind. Ping it (GET /api/session, which answers with the id) before
 /// believing it. The session being served here is marked `current`.
+///
+/// A session marked `missing` no longer has the file or the inputs it was made
+/// of, so resuming it can only fail: leave it out of anything offering a way
+/// into another session, as `sqlnow --resume` does.
 #[get("/api/sessions")]
 async fn list_stored_sessions(app_data: web::Data<AppData>) -> HttpResponse {
     let store = match &app_data.store {
@@ -224,6 +228,9 @@ async fn list_stored_sessions(app_data: web::Data<AppData>) -> HttpResponse {
                 "queries": session.queries,
                 "age_seconds": session.age_seconds,
                 "url": session.url,
+                // what the session was made of has gone, so it can only be
+                // deleted — listings leave these out unless asked
+                "missing": session.missing(),
                 "current": Some(&session.id) == here.as_ref(),
             })
         })

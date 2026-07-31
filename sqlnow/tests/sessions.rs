@@ -93,6 +93,46 @@ fn a_named_session_file_can_be_carried_around() {
 }
 
 #[test]
+fn a_session_whose_data_has_gone_is_kept_but_not_listed() {
+    let space = Workspace::new("missing-hidden");
+    let scratch = space.write("scratch.csv", "name,mw\nUnit 1,50\n");
+    let kept = space.csv("plants.csv");
+
+    space.start(&[&scratch.to_string_lossy(), "-q", "gone=SELECT 1"]).stop();
+    space.start(&[&kept.to_string_lossy(), "-q", "here=SELECT 2"]).stop();
+    std::fs::remove_file(&scratch).expect("removing the scratch input");
+
+    // nothing can be done with a session whose inputs have gone, so the
+    // listing leaves it out — and says that it did
+    let listed = space.run_text(&["--resume"]);
+    assert!(
+        !listed.contains("scratch.csv"),
+        "a session that cannot resume was listed:\n{}",
+        listed
+    );
+    assert!(listed.contains("plants.csv"), "{}", listed);
+    assert!(listed.contains("hidden"), "the hidden one should be counted:\n{}", listed);
+
+    // hidden, not deleted: --all shows it, marked, and without a position
+    let all = space.run_text(&["--resume", "--all"]);
+    assert!(all.contains("scratch.csv (missing)"), "{}", all);
+    let row = all.lines().find(|line| line.contains("scratch.csv")).expect("the missing row");
+    assert!(row.starts_with(' '), "a missing session was given a position: {:?}", row);
+
+    // a position counts only what can be resumed, so it means the same in both
+    let resumed = space.start(&["--resume", "1"]);
+    assert_eq!(resumed.query_names(), ["here"]);
+    resumed.stop();
+
+    // and the hidden one is still named by its id, which is how it is removed
+    let hidden =
+        space.exec_value(&space.store(), "SELECT session FROM queries WHERE name = 'gone'");
+    space.run_text(&["delete", &hidden, "-y"]);
+    let left = space.exec_value(&space.store(), "SELECT count(*) FROM sessions");
+    assert_eq!(left, "1", "deleting the hidden session by id left:\n{}", left);
+}
+
+#[test]
 fn an_input_that_has_gone_is_an_error_not_a_missing_table() {
     let space = Workspace::new("missing-input");
     let csv = space.csv("plants.csv");

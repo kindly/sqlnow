@@ -95,6 +95,12 @@ pub struct Cli {
     #[arg(long, num_args = 0..=1, value_name = "N|ID")]
     pub resume: Option<Option<String>>,
 
+    /// With --resume and no value, also list the sessions whose files or
+    /// inputs have gone. They are hidden by default because they cannot be
+    /// resumed; they are listed without a position and named by id.
+    #[arg(long, requires = "resume")]
+    pub all: bool,
+
     /// Keep this run out of the session list. Only applies when the session
     /// lives in a file of its own (a database sidecar or a named .sqlnow):
     /// the session works as usual, but --resume will not be able to find it.
@@ -516,7 +522,7 @@ pub fn run_immediate(cli: &Cli) -> Result<bool> {
         return Ok(true);
     }
     if let Some(None) = &cli.resume {
-        print_recent_sessions()?;
+        print_recent_sessions(cli.all)?;
         return Ok(true);
     }
     match &cli.command {
@@ -730,7 +736,13 @@ fn session_label(session: &StoredSession) -> String {
     if session.inputs.is_empty() {
         return "(no inputs recorded)".to_string();
     }
-    session.inputs.iter().map(|uri| shorten_home(uri)).collect::<Vec<_>>().join(", ")
+    let label = session.inputs.iter().map(|uri| shorten_home(uri)).collect::<Vec<_>>().join(", ");
+    // its inputs are what a stored session is, so all of them being gone says
+    // the same as a deleted file does for a registered one
+    match session.missing() {
+        true => format!("{} (missing)", label),
+        false => label,
+    }
 }
 
 fn shorten_home(path: &str) -> String {
@@ -758,8 +770,9 @@ fn age(seconds: i64) -> String {
     }
 }
 
-/// `--resume` with no value: show what there is to resume.
-fn print_recent_sessions() -> Result<()> {
+/// `--resume` with no value: show what there is to resume. `all` also shows
+/// the sessions that cannot be resumed because what they were made of has gone.
+fn print_recent_sessions(all: bool) -> Result<()> {
     let sessions = recent_sessions();
     if sessions.is_empty() {
         println!(
@@ -767,12 +780,37 @@ fn print_recent_sessions() -> Result<()> {
         );
         return Ok(());
     }
+    // A position names a session that can be resumed, so a missing one never
+    // takes a number: the numbers then mean the same thing whether or not the
+    // listing was asked to show the missing ones, and `--resume 2` cannot come
+    // to point somewhere else because a file was deleted.
+    let mut position = 0;
+    let listed: Vec<(String, &StoredSession)> = sessions
+        .iter()
+        .filter_map(|session| {
+            if session.missing() {
+                return all.then(|| (String::new(), session));
+            }
+            position += 1;
+            Some((position.to_string(), session))
+        })
+        .collect();
+    let hidden = sessions.len() - listed.len();
+    if listed.is_empty() {
+        println!(
+            "No sessions to resume — {} whose files have gone are hidden. \
+             See them with `sqlnow --resume --all`, and remove them by id with `sqlnow delete`.",
+            hidden
+        );
+        return Ok(());
+    }
     // nothing is ever deleted, so a long-lived store can hold thousands: show
     // the recent ones and leave the rest reachable by id
-    let total = sessions.len();
-    let shown = &sessions[..total.min(LISTING_LIMIT)];
+    let total = listed.len();
+    let rows = &listed[..total.min(LISTING_LIMIT)];
+    let shown: Vec<&StoredSession> = rows.iter().map(|(_, session)| *session).collect();
 
-    let positions: Vec<String> = (1..=shown.len()).map(|n| n.to_string()).collect();
+    let positions: Vec<String> = rows.iter().map(|(position, _)| position.clone()).collect();
     let ids: Vec<String> =
         shown.iter().map(|session| session.id.chars().take(8).collect()).collect();
     let ages: Vec<String> = shown.iter().map(|session| age(session.age_seconds)).collect();
@@ -846,6 +884,24 @@ fn print_recent_sessions() -> Result<()> {
             "\n{} of {} shown — older ones are still there, resume them by id",
             shown.len(),
             total
+        );
+    }
+    // said rather than left out: a listing that quietly drops rows reads as the
+    // whole store, and these are exactly the ones worth deleting
+    if hidden > 0 {
+        println!(
+            "\n{} session{} whose files have gone {} hidden — see them with `sqlnow --resume --all`",
+            hidden,
+            if hidden == 1 { "" } else { "s" },
+            if hidden == 1 { "is" } else { "are" }
+        );
+    }
+    // a listed missing session can only be deleted, and only by id: it has no
+    // position, so the closing hint would name the wrong thing
+    if let Some(index) = shown.iter().position(|session| session.missing()) {
+        println!(
+            "\nA `(missing)` session cannot be resumed. Remove one by id: `sqlnow delete {}`.",
+            ids[index]
         );
     }
     println!(
@@ -924,6 +980,10 @@ fn resolve_resume(value: &str) -> Result<ResumeTarget> {
 /// most recent) or an id, which may be shortened as long as it stays
 /// unambiguous. `context` is how the caller was spelled, so an error can
 /// repeat it back the way it was typed.
+///
+/// Positions count the sessions the listing shows by default — the ones that
+/// can be resumed — while an id matches any session in the store, including a
+/// missing one, which is how it is named to `sqlnow delete`.
 fn find_stored<'a>(
     sessions: &'a [StoredSession],
     value: &str,
@@ -937,7 +997,9 @@ fn find_stored<'a>(
     // exist falls through to matching ids rather than failing outright
     if value.len() < 16 {
         if let Ok(position) = value.parse::<usize>() {
-            if let Some(session) = position.checked_sub(1).and_then(|index| sessions.get(index)) {
+            let numbered: Vec<&StoredSession> =
+                sessions.iter().filter(|session| !session.missing()).collect();
+            if let Some(session) = position.checked_sub(1).and_then(|index| numbered.get(index)) {
                 return Ok(session);
             }
         }

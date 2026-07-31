@@ -351,8 +351,11 @@ Three pitfalls matter:
 - `sqlnow --resume` lists recent sessions and exits;
   `sqlnow --resume <n|id>` opens one and replays its inputs. It marks served
   sessions `live` with their address, which is how to find an unknown port. A
-  live session cannot be opened twice. Missing files are shown as `(missing)`
-  and cannot resume; missing recorded inputs are errors.
+  live session cannot be opened twice. Missing recorded inputs are errors.
+- Sessions whose file or every local input has gone are kept but left out of
+  the listing, since they cannot be resumed: `--resume --all` shows them as
+  `(missing)`, without a position, to be named by id. Positions count only the
+  listed ones, so they mean the same thing in both listings.
 - `sqlnow delete <n|id>...` permanently deletes the selected sessions,
   including queries, history, inputs and metadata, but not data files. It
   refuses live sessions and requires `--yes` without a terminal. **Never run

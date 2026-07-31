@@ -192,4 +192,15 @@ fn a_server_can_list_the_other_sessions() {
     assert!(other["inputs"][0].as_str().unwrap().ends_with("one.csv"), "{}", other);
     assert!(other["url"].is_null(), "a closed session should claim no address: {}", other);
     assert!(sessions[0]["age_seconds"].as_i64().unwrap() >= 0);
+
+    // what a menu needs to leave out a dead end: the other session's input is
+    // gone, so it says so — while the one being served never does
+    assert_eq!(other["missing"], false, "{}", other);
+    std::fs::remove_file(&one).expect("removing the other session's input");
+    let again = server.get("/api/sessions");
+    let others: Vec<&serde_json::Value> =
+        again["sessions"].as_array().unwrap().iter().filter(|s| s["current"] == false).collect();
+    assert_eq!(others[0]["missing"], true, "{}", again);
+    let here_now = again["sessions"].as_array().unwrap().iter().find(|s| s["current"] == true);
+    assert_eq!(here_now.unwrap()["missing"], false, "{}", again);
 }

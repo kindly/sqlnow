@@ -186,8 +186,13 @@ history — and the error tells you where the first one is. The addresses are
 pinged rather than trusted, so a server that was killed outright leaves nothing
 blocking you: the listing finds it dead, clears the address and moves on.
 
-A session whose file has since moved is listed as `(missing)` rather than
-dropped, and resuming it says so instead of quietly starting an empty one.
+A session whose file or inputs have since gone cannot be resumed, so it is left
+out of the listing — with a line saying how many were hidden, and
+`sqlnow --resume --all` to see them, marked `(missing)`. They are kept, not
+deleted: an id still resumes one (which says what is missing rather than
+quietly starting an empty session) and still names it to `sqlnow delete`.
+Positions count only the sessions that can be resumed, so a deleted file never
+renumbers the rest.
 
 `sqlnow --resume 2` opens one by position, `sqlnow --resume 64942c` by id, and
 either replays that session's inputs — so you get the tables, queries and
